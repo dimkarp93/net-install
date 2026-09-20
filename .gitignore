@@ -1,0 +1,6 @@
+/net-install
+/bin/
+/dist/
+/go.work
+/go.work.sum
+coverage.out
