@@ -82,7 +82,7 @@ jobs:
             CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
               go build -trimpath \
                 -ldflags="-s -w -X main.version=${VERSION} -X main.origin=${ORIGIN} -X main.upstream=${UPSTREAM} -X main.commit=${COMMIT} -X main.channel=${CHANNEL}" \
-                -o "$tmp/${BIN}" ./...
+                -o "$tmp/${BIN}" "./cmd/${BIN}"
             chmod +x "$tmp/${BIN}"
             tar -C "$tmp" -czf "$out" "${BIN}"
             rm -rf "$tmp"
