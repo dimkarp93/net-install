@@ -1,5 +1,7 @@
 bin := "net-install"
 version_file := "versions.txt"
+export GOWORK := "off"
+export GOFLAGS := "-mod=vendor"
 
 _default:
     @just --list
@@ -29,7 +31,7 @@ vet:
     go vet ./...
 
 fmt:
-    gofmt -l -w .
+    go fmt ./...
 
 check: vet test
 
@@ -91,3 +93,11 @@ release level="patch":
     git commit -q -m "release v$v"
     git push origin HEAD
     echo "Pushed v$v - the release workflow will create the tag"
+
+vendor:
+    GOWORK=off go mod tidy
+    GOWORK=off go mod vendor
+
+vendor-check:
+    GOWORK=off go mod vendor
+    test -z "$(git status --porcelain -- go.mod go.sum vendor/ | tee /dev/stderr)"
