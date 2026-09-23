@@ -49,7 +49,7 @@ install: build
 uninstall:
     rm -f "$HOME/.local/bin/{{bin}}"
 
-bump-patch:
+bump-patch: && (_bump-commit "patch")
     #!/usr/bin/env sh
     set -eu
     v=$(tr -d '[:space:]' < versions.txt)
@@ -59,7 +59,7 @@ bump-patch:
     printf '%s.%s.%s\n' "$MAJ" "$MIN" "$((PAT + 1))" > versions.txt
     cat versions.txt
 
-bump-minor:
+bump-minor: && (_bump-commit "minor")
     #!/usr/bin/env sh
     set -eu
     v=$(tr -d '[:space:]' < versions.txt)
@@ -69,7 +69,7 @@ bump-minor:
     printf '%s.%s.0\n' "$MAJ" "$((MIN + 1))" > versions.txt
     cat versions.txt
 
-bump-major:
+bump-major: && (_bump-commit "major")
     #!/usr/bin/env sh
     set -eu
     v=$(tr -d '[:space:]' < versions.txt)
@@ -79,6 +79,24 @@ bump-major:
     printf '%s.0.0\n' "$((MAJ + 1))" > versions.txt
     cat versions.txt
 
+_bump-commit level:
+    #!/usr/bin/env sh
+    set -eu
+    v=$(tr -d '[:space:]' < versions.txt)
+    if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then
+        git checkout -- versions.txt
+        echo "tag v$v already exists" >&2
+        exit 1
+    fi
+    git commit -q -m "bump {{level}}" -- versions.txt
+    git tag "v$v"
+    rc=0
+    for r in $(git remote); do
+        git push -q "$r" HEAD --tags || { echo "push to $r failed" >&2; rc=1; }
+    done
+    echo "Tagged v$v"
+    exit "$rc"
+
 release level="patch":
     #!/usr/bin/env sh
     set -eu
@@ -87,12 +105,7 @@ release level="patch":
         *) echo "level must be patch, minor or major" >&2; exit 1 ;;
     esac
     git diff --quiet && git diff --cached --quiet || { echo "working tree is dirty" >&2; exit 1; }
-    just bump-{{level}} >/dev/null
-    v=$(tr -d '[:space:]' < versions.txt)
-    git add versions.txt
-    git commit -q -m "release v$v"
-    git push origin HEAD
-    echo "Pushed v$v - the release workflow will create the tag"
+    just bump-{{level}}
 
 vendor:
     GOWORK=off go mod tidy
