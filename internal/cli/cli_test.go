@@ -13,6 +13,8 @@ import (
 func quiet(t *testing.T) {
 	t.Helper()
 	t.Setenv("NO_PROXY", "*")
+	t.Setenv("NET_CACHE_DIR", t.TempDir())
+	t.Setenv("NET_DELAY", "0")
 	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)

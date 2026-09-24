@@ -76,3 +76,20 @@ func TestParseMode(t *testing.T) {
 		t.Fatalf("got %o, %v", m, err)
 	}
 }
+
+func TestCacheOptions(t *testing.T) {
+	c := New()
+	if c.CacheDir != "/mnt/hdd/auto-distrib" || c.NoCache || c.ForceUpdate {
+		t.Fatalf("defaults: %q %v %v", c.CacheDir, c.NoCache, c.ForceUpdate)
+	}
+	err := c.LoadEnv(lookup(map[string]string{"NET_CACHE_DIR": "/x", "NET_FORCE_UPDATE": "1", "NET_NO_CACHE": "yes"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.CacheDir != "/x" || !c.ForceUpdate || !c.NoCache {
+		t.Fatalf("env: %q %v %v", c.CacheDir, c.ForceUpdate, c.NoCache)
+	}
+	if New().Set(CacheDir, "", SourceFlag) == nil {
+		t.Fatal("an empty cache dir was accepted")
+	}
+}

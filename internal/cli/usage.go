@@ -14,6 +14,7 @@ Commands:
   download [flags] URL DEST     download into a temporary file, then install it into DEST
   script [flags] URL [ARG...]   download a script and run it; ARG go to the script
   clone [flags] URL DEST        git clone --depth 1 with retries; skips an existing DEST
+  apt [flags] PKG...            sudo apt-get install -y PKG, reusing cached .deb files
   log KEY=VALUE...              print one log line, no network
   env                           print the effective NET_* values and where they come from
 
@@ -25,6 +26,12 @@ Network flags (fetch, download, script, clone):
   --speed-time SEC       time below the threshold      (NET_SPEED_TIME, default 30)
   --retry-all-errors     retry 4xx as well             (NET_RETRY_ALL)
 
+Cache flags (fetch, download, script, clone, apt):
+  --cache-dir DIR        artifact cache                (NET_CACHE_DIR, default /mnt/hdd/auto-distrib)
+  --no-cache             bypass the cache              (NET_NO_CACHE)
+  --force-update         download again, refresh cache (NET_FORCE_UPDATE)
+  A missing or read-only cache dir is an error: pass --cache-dir or --no-cache.
+
 download:
   --mode MODE            permissions on DEST           (NET_MODE, default 0644)
 
@@ -34,6 +41,7 @@ script:
 clone:
   --depth N              clone depth (default 1)
   --force                clone even if DEST exists
+  With --force-update an existing DEST is cloned again as well.
 
   --version, -v          print the version
   --origin               print the repository this binary was built from

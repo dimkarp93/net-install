@@ -25,6 +25,7 @@ net-install fetch    [флаги] URL DEST        скачать URL в DEST ("-
 net-install download [флаги] URL DEST        скачать во временный файл и установить в DEST
 net-install script   [флаги] URL [АРГ...]    скачать скрипт и выполнить; АРГ уходят скрипту
 net-install clone    [флаги] URL DEST        git clone --depth 1, пропускает существующий DEST
+net-install apt      [флаги] ПАКЕТ...        sudo apt-get install -y с кэшем .deb
 net-install log      KEY=VALUE...            напечатать строку лога, без обращения к сети
 net-install env                              действующие NET_* и откуда они взялись
 ```
@@ -52,6 +53,9 @@ net-install script --shell bash https://just.systems/install.sh --to ~/.local/bi
 | `NET_SHELL` | `--shell` | `sh` | интерпретатор для `script` |
 | `NET_MODE` | `--mode` | `0644` | права на `DEST` для `download` |
 | `NET_RETRY_ALL` | `--retry-all-errors` | выкл | повторять и 4xx тоже |
+| `NET_CACHE_DIR` | `--cache-dir` | `/mnt/hdd/auto-distrib` | каталог кэша |
+| `NET_NO_CACHE` | `--no-cache` | выкл | работать без кэша |
+| `NET_FORCE_UPDATE` | `--force-update` | выкл | скачать заново и обновить кэш |
 
 Флаг сильнее переменной, переменная сильнее умолчания. `net-install env` показывает,
 что именно действует сейчас:
@@ -67,6 +71,37 @@ NET_CONNECT_TIMEOUT=20 (default)
 Загрузка обрывается и повторяется, если скорость держится ниже `NET_SPEED_LIMIT`
 дольше `NET_SPEED_TIME` - зависшее соединение не блокирует установку. `clone`
 передаёт те же два значения в `git` как `http.lowSpeedLimit` и `http.lowSpeedTime`.
+
+## Кэш
+
+`fetch`, `download`, `script`, `clone` и `apt` складывают скачанное в
+`NET_CACHE_DIR` и при следующем вызове берут оттуда, не выходя в сеть:
+
+```
+/mnt/hdd/auto-distrib/
+  files/<host>/<path>            fetch, download, script
+  files/<host>/<path>.sha256     сверяется перед каждым использованием
+  git/<host>/<owner>/<repo>/     shallow-зеркало для clone
+  apt/*.deb                      пакеты, скачанные apt-get
+```
+
+URL с query-строкой получает к имени суффикс `@<первые 12 символов sha256(query)>`.
+
+- Файл берётся из кэша, если он есть и его sha256 совпадает с записанной. Иначе он
+  скачивается заново.
+- `clone` клонирует из локального зеркала и затем возвращает `origin` на исходный URL.
+- `apt` перед установкой копирует недостающие `.deb` из кэша в
+  `/var/cache/apt/archives`, после установки забирает новые обратно. Какую версию
+  ставить, решает сам apt по своим индексам, поэтому `apt update` по-прежнему нужен.
+- `--force-update` скачивает всё заново и обновляет кэш: файлы перекачиваются,
+  зеркало делает `git fetch`, существующий `DEST` у `clone` клонируется повторно, у `apt`
+  пропускается подкладывание `.deb`. Если обновить файл или зеркало не удалось, а
+  старая копия есть, используется она (`event=cache-stale`).
+- Если каталога нет, net-install создаёт его, но только когда существует родитель. Если
+  каталог создать нельзя или он недоступен на запись, команда падает с кодом 1 и ничего
+  не скачивает. Работать без кэша можно только явно, через `--no-cache`.
+
+Дополнительные события лога: `cache-hit`, `cache-store`, `cache-stale`.
 
 ## Что повторяется, а что нет
 
@@ -88,7 +123,8 @@ NET_CONNECT_TIMEOUT=20 (default)
 [net] ts=2026-09-20T01:55:58Z event=size what=fetch url=https://github.com/... bytes=61521920
 ```
 
-События: `start`, `ok`, `retry`, `fail`, `size`, `install`, `exec`, `done`, `skip`.
+События: `start`, `ok`, `retry`, `fail`, `size`, `install`, `exec`, `done`, `skip`,
+`cache-hit`, `cache-store`, `cache-stale`.
 
 ## Коды возврата
 

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dimkarp93/net-install/internal/cache"
 	"github.com/dimkarp93/net-install/internal/config"
 	"github.com/dimkarp93/net-install/internal/httpget"
 	"github.com/dimkarp93/net-install/internal/instfile"
@@ -19,11 +20,12 @@ import (
 )
 
 type env struct {
-	cfg *config.Config
-	log *netlog.Logger
-	run runner.Runner
-	out io.Writer
-	err io.Writer
+	cfg   *config.Config
+	cache *cache.Cache
+	log   *netlog.Logger
+	run   runner.Runner
+	out   io.Writer
+	err   io.Writer
 }
 
 type localError struct{ err error }
@@ -50,6 +52,13 @@ var netSpec = spec{
 	flag: map[string]bool{config.RetryAll: true},
 }
 
+var cacheSpec = spec{
+	value: map[string]bool{config.CacheDir: true},
+	flag:  map[string]bool{config.NoCache: true, config.ForceUpdate: true},
+}
+
+var aptArchives = "/var/cache/apt/archives"
+
 func specFor(command string) (spec, bool) {
 	s := spec{value: map[string]bool{}, flag: map[string]bool{}}
 	for k, v := range netSpec.value {
@@ -58,9 +67,15 @@ func specFor(command string) (spec, bool) {
 	for k, v := range netSpec.flag {
 		s.flag[k] = v
 	}
+	for k, v := range cacheSpec.value {
+		s.value[k] = v
+	}
+	for k, v := range cacheSpec.flag {
+		s.flag[k] = v
+	}
 
 	switch command {
-	case "fetch":
+	case "fetch", "apt":
 	case "download":
 		s.value[config.Mode] = true
 	case "script":
@@ -123,6 +138,17 @@ func Run(args []string) int {
 	}
 
 	switch command {
+	case "fetch", "download", "script", "clone", "apt":
+		if !e.cfg.NoCache {
+			c, err := cache.Open(e.cfg.CacheDir)
+			if err != nil {
+				return fail(e, &localError{err})
+			}
+			e.cache = c
+		}
+	}
+
+	switch command {
 	case "fetch":
 		return cmdFetch(e, p.args)
 	case "download":
@@ -131,6 +157,8 @@ func Run(args []string) int {
 		return cmdScript(e, p.args)
 	case "clone":
 		return cmdClone(e, p.args)
+	case "apt":
+		return cmdApt(e, p.args)
 	case "log":
 		return cmdLog(e, p.args)
 	case "env":
@@ -184,27 +212,88 @@ func fetchInto(e *env, url string, f *os.File) error {
 	return nil
 }
 
+func obtain(e *env, url string) (string, func(), error) {
+	if e.cache != nil {
+		file, err := cachedFile(e, url)
+		return file, func() {}, err
+	}
+
+	f, err := os.CreateTemp("", "net-install-*")
+	if err != nil {
+		return "", nil, &localError{err}
+	}
+	name := f.Name()
+	cleanup := func() { os.Remove(name) }
+
+	if err := fetchInto(e, url, f); err != nil {
+		f.Close()
+		cleanup()
+		return "", nil, err
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return "", nil, &localError{err}
+	}
+	return name, cleanup, nil
+}
+
+func cachedFile(e *env, url string) (string, error) {
+	file, err := e.cache.FilePath(url)
+	if err != nil {
+		return "", &localError{err}
+	}
+
+	have := cache.Valid(file)
+	if have && !e.cfg.ForceUpdate {
+		e.log.Logf("event=cache-hit what=%s path=%s", url, file)
+		return file, nil
+	}
+
+	tmp, err := cache.Temp(file)
+	if err != nil {
+		return "", &localError{err}
+	}
+	if err := fetchInto(e, url, tmp); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		if have {
+			e.log.Logf("event=cache-stale what=%s path=%s", url, file)
+			return file, nil
+		}
+		return "", err
+	}
+	if err := cache.Store(tmp, file); err != nil {
+		os.Remove(tmp.Name())
+		return "", &localError{err}
+	}
+	e.log.Logf("event=cache-store what=%s path=%s", url, file)
+	return file, nil
+}
+
+func copyFrom(src string, w io.Writer) error {
+	f, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = io.Copy(w, f)
+	return err
+}
+
 func cmdFetch(e *env, args []string) int {
 	if len(args) != 2 {
 		return usageError(e, fmt.Errorf("fetch requires URL and DEST"))
 	}
 	url, dest := args[0], args[1]
 
-	if dest == "-" {
-		f, err := os.CreateTemp("", "net-install-*")
-		if err != nil {
-			return fail(e, &localError{err})
-		}
-		defer os.Remove(f.Name())
-		defer f.Close()
+	src, cleanup, err := obtain(e, url)
+	if err != nil {
+		return fail(e, err)
+	}
+	defer cleanup()
 
-		if err := fetchInto(e, url, f); err != nil {
-			return fail(e, err)
-		}
-		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			return fail(e, &localError{err})
-		}
-		if _, err := io.Copy(e.out, f); err != nil {
+	if dest == "-" {
+		if err := copyFrom(src, e.out); err != nil {
 			return fail(e, &localError{err})
 		}
 		return 0
@@ -216,8 +305,8 @@ func cmdFetch(e *env, args []string) int {
 	}
 	defer f.Close()
 
-	if err := fetchInto(e, url, f); err != nil {
-		return fail(e, err)
+	if err := copyFrom(src, f); err != nil {
+		return fail(e, &localError{err})
 	}
 	return 0
 }
@@ -239,8 +328,14 @@ func cmdDownload(e *env, args []string) int {
 	}
 	defer target.Close()
 
-	if err := fetchInto(e, url, target.File()); err != nil {
+	src, cleanup, err := obtain(e, url)
+	if err != nil {
 		return fail(e, err)
+	}
+	defer cleanup()
+
+	if err := copyFrom(src, target.File()); err != nil {
+		return fail(e, &localError{err})
 	}
 
 	rc := 0
@@ -261,24 +356,23 @@ func cmdScript(e *env, args []string) int {
 	}
 	url, rest := args[0], args[1:]
 
-	f, err := os.CreateTemp("", "net-install-*")
+	src, cleanup, err := obtain(e, url)
 	if err != nil {
-		return fail(e, &localError{err})
-	}
-	defer os.Remove(f.Name())
-
-	if err := fetchInto(e, url, f); err != nil {
-		f.Close()
 		return fail(e, err)
 	}
-	if err := f.Close(); err != nil {
-		return fail(e, &localError{err})
-	}
+	defer cleanup()
 
 	e.log.Logf("event=exec what=%s interpreter=%s", url, e.cfg.Shell)
-	rc := e.run.Run(e.cfg.Shell, append([]string{f.Name()}, rest...)...)
+	rc := e.run.Run(e.cfg.Shell, append([]string{src}, rest...)...)
 	e.log.Logf("event=done what=%s rc=%d", url, rc)
 	return rc
+}
+
+func gitNet(e *env, args ...string) []string {
+	return append([]string{
+		"-c", "http.lowSpeedLimit=" + strconv.Itoa(e.cfg.SpeedLimit),
+		"-c", "http.lowSpeedTime=" + strconv.Itoa(e.cfg.SpeedTime),
+	}, args...)
 }
 
 func cmdClone(e *env, args []string) int {
@@ -287,7 +381,7 @@ func cmdClone(e *env, args []string) int {
 	}
 	url, dest := args[0], args[1]
 
-	if _, err := os.Stat(dest); err == nil && !e.cfg.Force {
+	if _, err := os.Stat(dest); err == nil && !e.cfg.Force && !e.cfg.ForceUpdate {
 		e.log.Logf("event=skip what=clone dest=%s reason=exists", dest)
 		return 0
 	}
@@ -296,23 +390,207 @@ func cmdClone(e *env, args []string) int {
 		return usageError(e, err)
 	}
 
-	err := retry.Do(e.log, retryOpts(e.cfg), "clone "+url, func() error {
+	if e.cache == nil {
+		if err := cloneInto(e, url, dest, true); err != nil {
+			return fail(e, err)
+		}
+		return 0
+	}
+
+	mirror, err := mirrorFor(e, url)
+	if err != nil {
+		return fail(e, err)
+	}
+	if err := cloneInto(e, mirror, dest, false); err != nil {
+		return fail(e, err)
+	}
+	if rc := e.run.Run("git", "-C", dest, "remote", "set-url", "origin", url); rc != 0 {
+		return fail(e, &gitError{rc})
+	}
+	return 0
+}
+
+func cloneInto(e *env, src, dest string, shallow bool) error {
+	return retry.Do(e.log, retryOpts(e.cfg), "clone "+src, func() error {
 		if err := os.RemoveAll(dest); err != nil {
 			return &localError{err}
 		}
-		rc := e.run.Run("git",
-			"-c", "http.lowSpeedLimit="+strconv.Itoa(e.cfg.SpeedLimit),
-			"-c", "http.lowSpeedTime="+strconv.Itoa(e.cfg.SpeedTime),
-			"clone", "--depth", strconv.Itoa(e.cfg.Depth), url, dest)
+		args := []string{"clone"}
+		if shallow {
+			args = append(args, "--depth", strconv.Itoa(e.cfg.Depth))
+		}
+		rc := e.run.Run("git", gitNet(e, append(args, src, dest)...)...)
+		if rc != 0 {
+			return &gitError{rc}
+		}
+		return nil
+	})
+}
+
+func mirrorFor(e *env, url string) (string, error) {
+	mirror, err := e.cache.GitPath(url)
+	if err != nil {
+		return "", &localError{err}
+	}
+
+	if st, err := os.Stat(filepath.Join(mirror, ".git")); err == nil && st.IsDir() {
+		if !e.cfg.ForceUpdate {
+			e.log.Logf("event=cache-hit what=%s path=%s", url, mirror)
+			return mirror, nil
+		}
+		if err := updateMirror(e, url, mirror); err != nil {
+			e.log.Logf("event=cache-stale what=%s path=%s", url, mirror)
+			return mirror, nil
+		}
+		e.log.Logf("event=cache-store what=%s path=%s", url, mirror)
+		return mirror, nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(mirror), 0o755); err != nil {
+		return "", &localError{err}
+	}
+	tmp, err := os.MkdirTemp(filepath.Dir(mirror), ".net-install-*")
+	if err != nil {
+		return "", &localError{err}
+	}
+	defer os.RemoveAll(tmp)
+
+	if err := cloneInto(e, url, tmp, true); err != nil {
+		return "", err
+	}
+	if err := os.RemoveAll(mirror); err != nil {
+		return "", &localError{err}
+	}
+	if err := os.Rename(tmp, mirror); err != nil {
+		return "", &localError{err}
+	}
+	e.log.Logf("event=cache-store what=%s path=%s", url, mirror)
+	return mirror, nil
+}
+
+func updateMirror(e *env, url, mirror string) error {
+	err := retry.Do(e.log, retryOpts(e.cfg), "fetch "+url, func() error {
+		rc := e.run.Run("git", gitNet(e, "-C", mirror, "fetch", "--depth", strconv.Itoa(e.cfg.Depth), "origin")...)
 		if rc != 0 {
 			return &gitError{rc}
 		}
 		return nil
 	})
 	if err != nil {
-		return fail(e, err)
+		return err
+	}
+	if rc := e.run.Run("git", "-C", mirror, "reset", "-q", "--hard", "FETCH_HEAD"); rc != 0 {
+		return &gitError{rc}
+	}
+	return nil
+}
+
+func cmdApt(e *env, pkgs []string) int {
+	if len(pkgs) == 0 {
+		return usageError(e, fmt.Errorf("apt requires at least one package"))
+	}
+
+	if e.cache != nil && !e.cfg.ForceUpdate {
+		if err := preloadDebs(e); err != nil {
+			return fail(e, &localError{err})
+		}
+	}
+
+	args := append([]string{
+		"apt-get", "install", "-y",
+		"-o", "APT::Keep-Downloaded-Packages=true",
+		"-o", "Acquire::Retries=" + strconv.Itoa(e.cfg.Retries),
+	}, pkgs...)
+	e.log.Logf("event=exec what=apt packages=%s", strings.Join(pkgs, ","))
+	rc := runRoot(e, args...)
+	e.log.Logf("event=done what=apt rc=%d", rc)
+	if rc != 0 {
+		return rc
+	}
+
+	if e.cache != nil {
+		if err := collectDebs(e); err != nil {
+			return fail(e, &localError{err})
+		}
 	}
 	return 0
+}
+
+func runRoot(e *env, args ...string) int {
+	if os.Geteuid() == 0 {
+		return e.run.Run(args[0], args[1:]...)
+	}
+	return e.run.Run("sudo", args...)
+}
+
+func debs(dir string) (map[string]bool, error) {
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return map[string]bool{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]bool{}
+	for _, en := range entries {
+		if en.Type().IsRegular() && strings.HasSuffix(en.Name(), ".deb") {
+			out[en.Name()] = true
+		}
+	}
+	return out, nil
+}
+
+func preloadDebs(e *env) error {
+	cached, err := debs(e.cache.AptDir())
+	if err != nil {
+		return err
+	}
+	present, err := debs(aptArchives)
+	if err != nil {
+		return err
+	}
+
+	var missing []string
+	for name := range cached {
+		if !present[name] {
+			missing = append(missing, filepath.Join(e.cache.AptDir(), name))
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+
+	if rc := runRoot(e, append([]string{"cp", "-p", "-t", aptArchives}, missing...)...); rc != 0 {
+		return fmt.Errorf("copying debs into %s exited with %d", aptArchives, rc)
+	}
+	e.log.Logf("event=cache-hit what=apt path=%s count=%d", e.cache.AptDir(), len(missing))
+	return nil
+}
+
+func collectDebs(e *env) error {
+	present, err := debs(aptArchives)
+	if err != nil {
+		return err
+	}
+	cached, err := debs(e.cache.AptDir())
+	if err != nil {
+		return err
+	}
+
+	n := 0
+	for name := range present {
+		if cached[name] {
+			continue
+		}
+		if err := cache.CopyFile(filepath.Join(aptArchives, name), filepath.Join(e.cache.AptDir(), name)); err != nil {
+			return err
+		}
+		n++
+	}
+	if n > 0 {
+		e.log.Logf("event=cache-store what=apt path=%s count=%d", e.cache.AptDir(), n)
+	}
+	return nil
 }
 
 func cmdLog(e *env, args []string) int {

@@ -24,7 +24,12 @@ const (
 	RetryAll       = "retry-all-errors"
 	Depth          = "depth"
 	Force          = "force"
+	CacheDir       = "cache-dir"
+	NoCache        = "no-cache"
+	ForceUpdate    = "force-update"
 )
+
+const DefaultCacheDir = "/mnt/hdd/auto-distrib"
 
 var Env = map[string]string{
 	Retries:        "NET_RETRIES",
@@ -35,9 +40,12 @@ var Env = map[string]string{
 	Shell:          "NET_SHELL",
 	Mode:           "NET_MODE",
 	RetryAll:       "NET_RETRY_ALL",
+	CacheDir:       "NET_CACHE_DIR",
+	NoCache:        "NET_NO_CACHE",
+	ForceUpdate:    "NET_FORCE_UPDATE",
 }
 
-var order = []string{Retries, Delay, ConnectTimeout, SpeedLimit, SpeedTime, Shell, Mode, RetryAll}
+var order = []string{Retries, Delay, ConnectTimeout, SpeedLimit, SpeedTime, Shell, Mode, RetryAll, CacheDir, NoCache, ForceUpdate}
 
 type Config struct {
 	Retries        int
@@ -50,6 +58,9 @@ type Config struct {
 	RetryAll       bool
 	Depth          int
 	Force          bool
+	CacheDir       string
+	NoCache        bool
+	ForceUpdate    bool
 
 	source map[string]Source
 }
@@ -64,6 +75,7 @@ func New() *Config {
 		Shell:          "sh",
 		Mode:           "0644",
 		Depth:          1,
+		CacheDir:       DefaultCacheDir,
 		source:         map[string]Source{},
 	}
 }
@@ -115,15 +127,30 @@ func (c *Config) Set(name, value string, src Source) error {
 		c.source[name] = src
 		return nil
 	case Force:
-		b, err := parseBool(value)
-		if err != nil {
-			return err
+		return c.setBool(&c.Force, name, value, src)
+	case NoCache:
+		return c.setBool(&c.NoCache, name, value, src)
+	case ForceUpdate:
+		return c.setBool(&c.ForceUpdate, name, value, src)
+	case CacheDir:
+		if value == "" {
+			return fmt.Errorf("%s: expected a path", name)
 		}
-		c.Force = b
+		c.CacheDir = value
 		c.source[name] = src
 		return nil
 	}
 	return fmt.Errorf("unknown option %q", name)
+}
+
+func (c *Config) setBool(dst *bool, name, value string, src Source) error {
+	b, err := parseBool(value)
+	if err != nil {
+		return err
+	}
+	*dst = b
+	c.source[name] = src
+	return nil
 }
 
 func (c *Config) setInt(dst *int, name, value string, src Source, min int) error {
@@ -171,12 +198,22 @@ func (c *Config) value(name string) string {
 	case Mode:
 		return c.Mode
 	case RetryAll:
-		if c.RetryAll {
-			return "1"
-		}
-		return "0"
+		return boolString(c.RetryAll)
+	case CacheDir:
+		return c.CacheDir
+	case NoCache:
+		return boolString(c.NoCache)
+	case ForceUpdate:
+		return boolString(c.ForceUpdate)
 	}
 	return ""
+}
+
+func boolString(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
 }
 
 func ParseMode(s string) (uint32, error) {
