@@ -80,7 +80,7 @@ func TestCorruptedCacheEntryIsDownloadedAgain(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "out")
 
 	Run([]string{"fetch", srv.URL + "/f", dest})
-	c, _ := cache.Open(os.Getenv("NET_CACHE_DIR"))
+	c, _ := cache.Open(os.Getenv("NET_CACHE_DIR"), false)
 	file, _ := c.FilePath(srv.URL + "/f")
 	if err := os.WriteFile(file, []byte("broken"), 0o644); err != nil {
 		t.Fatal(err)
@@ -235,12 +235,22 @@ func TestAptPreloadsAndCollectsDebs(t *testing.T) {
 	aptArchives = archives
 	t.Cleanup(func() { aptArchives = old })
 
-	c, err := cache.Open(t.TempDir())
+	osr := filepath.Join(t.TempDir(), "os-release")
+	os.WriteFile(osr, []byte("ID=debian\nVERSION_ID=\"13\"\n"), 0o644)
+	oldOSR := cache.OSRelease
+	cache.OSRelease = osr
+	t.Cleanup(func() { cache.OSRelease = oldOSR })
+
+	c, err := cache.Open(t.TempDir(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	os.MkdirAll(c.AptDir(), 0o755)
-	os.WriteFile(filepath.Join(c.AptDir(), "cached.deb"), []byte("c"), 0o644)
+	aptDir := c.AptDir(cache.Release())
+	if filepath.Base(aptDir) != "debian-13-"+debArchForTest() {
+		t.Fatalf("apt dir %s", aptDir)
+	}
+	os.MkdirAll(aptDir, 0o755)
+	os.WriteFile(filepath.Join(aptDir, "cached.deb"), []byte("c"), 0o644)
 	os.WriteFile(filepath.Join(archives, "fresh.deb"), []byte("f"), 0o644)
 
 	run := &fakeRunner{}
@@ -254,7 +264,7 @@ func TestAptPreloadsAndCollectsDebs(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(archives, "cached.deb")); err != nil {
 		t.Fatal("cached deb was not preloaded")
 	}
-	if _, err := os.Stat(filepath.Join(c.AptDir(), "fresh.deb")); err != nil {
+	if _, err := os.Stat(filepath.Join(aptDir, "fresh.deb")); err != nil {
 		t.Fatal("downloaded deb was not collected")
 	}
 	last := strings.Join(run.calls[len(run.calls)-1], " ")
@@ -268,5 +278,111 @@ func TestAptPreloadsAndCollectsDebs(t *testing.T) {
 	cmdApt(e, []string{"zsh"})
 	if len(run.calls) != 1 {
 		t.Fatalf("force-update still preloaded: %v", run.calls)
+	}
+}
+
+func debArchForTest() string {
+	r := cache.Release()
+	return r[strings.LastIndex(r, "-")+1:]
+}
+
+func TestReadOnlyCacheServesHitsAndDoesNotStoreMisses(t *testing.T) {
+	quiet(t)
+	srv, hits := counting(t, func(n int64) string { return fmt.Sprintf("v%d", n) })
+	dir := t.TempDir()
+	root := os.Getenv("NET_CACHE_DIR")
+
+	Run([]string{"fetch", srv.URL + "/cached", filepath.Join(dir, "a")})
+
+	t.Setenv("NET_CACHE_RO", "1")
+	if rc := Run([]string{"fetch", srv.URL + "/cached", filepath.Join(dir, "b")}); rc != 0 {
+		t.Fatalf("hit rc=%d", rc)
+	}
+	if got := read(t, filepath.Join(dir, "b")); got != "v1" || hits.Load() != 1 {
+		t.Fatalf("ro hit got %q after %d hits", got, hits.Load())
+	}
+
+	if rc := Run([]string{"fetch", srv.URL + "/fresh", filepath.Join(dir, "c")}); rc != 0 {
+		t.Fatalf("miss rc=%d", rc)
+	}
+	if got := read(t, filepath.Join(dir, "c")); got != "v2" {
+		t.Fatalf("ro miss got %q", got)
+	}
+	c, _ := cache.Open(root, true)
+	file, _ := c.FilePath(srv.URL + "/fresh")
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Fatal("a read-only cache stored a miss")
+	}
+}
+
+func TestReadOnlyCacheWorksOnAReadOnlyDirAndRejectsForceUpdate(t *testing.T) {
+	quiet(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	srv, _ := counting(t, func(n int64) string { return "x" })
+	root := t.TempDir()
+	os.Chmod(root, 0o555)
+	t.Cleanup(func() { os.Chmod(root, 0o755) })
+	dest := filepath.Join(t.TempDir(), "out")
+
+	if rc := Run([]string{"fetch", "--cache-dir", root, srv.URL, dest}); rc != 1 {
+		t.Fatalf("rw on a read-only dir rc=%d, want 1", rc)
+	}
+	if rc := Run([]string{"fetch", "--cache-dir", root, "--cache-ro", srv.URL, dest}); rc != 0 {
+		t.Fatalf("ro rc=%d", rc)
+	}
+	if rc := Run([]string{"fetch", "--cache-dir", root, "--cache-ro", "--force-update", srv.URL, dest}); rc != 2 {
+		t.Fatalf("ro+force-update rc=%d, want 2", rc)
+	}
+	if rc := Run([]string{"fetch", "--cache-dir", filepath.Join(root, "missing"), "--cache-ro", srv.URL, dest}); rc != 1 {
+		t.Fatalf("ro on a missing dir rc=%d, want 1", rc)
+	}
+}
+
+func TestReadOnlyCloneMissGoesToTheNetwork(t *testing.T) {
+	quiet(t)
+	root := t.TempDir()
+	url, _ := gitRepo(t, root)
+	t.Setenv("NET_CACHE_RO", "1")
+
+	dest := filepath.Join(root, "cloned")
+	if rc := Run([]string{"clone", url, dest}); rc != 0 {
+		t.Fatalf("rc=%d", rc)
+	}
+	if got := read(t, filepath.Join(dest, "readme")); got != "v1" {
+		t.Fatalf("got %q", got)
+	}
+	entries, _ := os.ReadDir(os.Getenv("NET_CACHE_DIR"))
+	if len(entries) != 0 {
+		t.Fatal("a read-only clone created a mirror")
+	}
+}
+
+func TestReadOnlyAptDoesNotCollect(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("runs without sudo as root")
+	}
+	archives := t.TempDir()
+	old := aptArchives
+	aptArchives = archives
+	t.Cleanup(func() { aptArchives = old })
+	os.WriteFile(filepath.Join(archives, "fresh.deb"), []byte("f"), 0o644)
+
+	root := t.TempDir()
+	c, err := cache.Open(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	devnull, _ := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	defer devnull.Close()
+	e := &env{cfg: config.New(), cache: c, log: netlog.New(devnull, nil), run: &fakeRunner{}, out: devnull, err: devnull}
+
+	if rc := cmdApt(e, []string{"zsh"}); rc != 0 {
+		t.Fatalf("rc=%d", rc)
+	}
+	entries, _ := os.ReadDir(root)
+	if len(entries) != 0 {
+		t.Fatal("a read-only apt run collected debs")
 	}
 }

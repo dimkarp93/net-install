@@ -54,7 +54,7 @@ var netSpec = spec{
 
 var cacheSpec = spec{
 	value: map[string]bool{config.CacheDir: true},
-	flag:  map[string]bool{config.NoCache: true, config.ForceUpdate: true},
+	flag:  map[string]bool{config.NoCache: true, config.ForceUpdate: true, config.CacheRO: true},
 }
 
 var aptArchives = "/var/cache/apt/archives"
@@ -140,7 +140,10 @@ func Run(args []string) int {
 	switch command {
 	case "fetch", "download", "script", "clone", "apt":
 		if !e.cfg.NoCache {
-			c, err := cache.Open(e.cfg.CacheDir)
+			if e.cfg.CacheRO && e.cfg.ForceUpdate {
+				return usageError(e, fmt.Errorf("--force-update cannot refresh a --cache-ro cache"))
+			}
+			c, err := cache.Open(e.cfg.CacheDir, e.cfg.CacheRO)
 			if err != nil {
 				return fail(e, &localError{err})
 			}
@@ -214,8 +217,20 @@ func fetchInto(e *env, url string, f *os.File) error {
 
 func obtain(e *env, url string) (string, func(), error) {
 	if e.cache != nil {
-		file, err := cachedFile(e, url)
-		return file, func() {}, err
+		file, err := e.cache.FilePath(url)
+		if err != nil {
+			return "", nil, &localError{err}
+		}
+		have := cache.Valid(file)
+		if have && !e.cfg.ForceUpdate {
+			e.log.Logf("event=cache-hit what=%s path=%s", url, file)
+			return file, func() {}, nil
+		}
+		if !e.cache.ReadOnly() {
+			file, err := storeFile(e, url, file, have)
+			return file, func() {}, err
+		}
+		e.log.Logf("event=cache-miss what=%s path=%s", url, file)
 	}
 
 	f, err := os.CreateTemp("", "net-install-*")
@@ -237,18 +252,7 @@ func obtain(e *env, url string) (string, func(), error) {
 	return name, cleanup, nil
 }
 
-func cachedFile(e *env, url string) (string, error) {
-	file, err := e.cache.FilePath(url)
-	if err != nil {
-		return "", &localError{err}
-	}
-
-	have := cache.Valid(file)
-	if have && !e.cfg.ForceUpdate {
-		e.log.Logf("event=cache-hit what=%s path=%s", url, file)
-		return file, nil
-	}
-
+func storeFile(e *env, url, file string, have bool) (string, error) {
 	tmp, err := cache.Temp(file)
 	if err != nil {
 		return "", &localError{err}
@@ -401,6 +405,12 @@ func cmdClone(e *env, args []string) int {
 	if err != nil {
 		return fail(e, err)
 	}
+	if mirror == "" {
+		if err := cloneInto(e, url, dest, true); err != nil {
+			return fail(e, err)
+		}
+		return 0
+	}
 	if err := cloneInto(e, mirror, dest, false); err != nil {
 		return fail(e, err)
 	}
@@ -444,6 +454,11 @@ func mirrorFor(e *env, url string) (string, error) {
 		}
 		e.log.Logf("event=cache-store what=%s path=%s", url, mirror)
 		return mirror, nil
+	}
+
+	if e.cache.ReadOnly() {
+		e.log.Logf("event=cache-miss what=%s path=%s", url, mirror)
+		return "", nil
 	}
 
 	if err := os.MkdirAll(filepath.Dir(mirror), 0o755); err != nil {
@@ -508,7 +523,7 @@ func cmdApt(e *env, pkgs []string) int {
 		return rc
 	}
 
-	if e.cache != nil {
+	if e.cache != nil && !e.cache.ReadOnly() {
 		if err := collectDebs(e); err != nil {
 			return fail(e, &localError{err})
 		}
@@ -541,7 +556,7 @@ func debs(dir string) (map[string]bool, error) {
 }
 
 func preloadDebs(e *env) error {
-	cached, err := debs(e.cache.AptDir())
+	cached, err := debs(e.cache.AptDir(cache.Release()))
 	if err != nil {
 		return err
 	}
@@ -553,7 +568,7 @@ func preloadDebs(e *env) error {
 	var missing []string
 	for name := range cached {
 		if !present[name] {
-			missing = append(missing, filepath.Join(e.cache.AptDir(), name))
+			missing = append(missing, filepath.Join(e.cache.AptDir(cache.Release()), name))
 		}
 	}
 	if len(missing) == 0 {
@@ -563,7 +578,7 @@ func preloadDebs(e *env) error {
 	if rc := runRoot(e, append([]string{"cp", "-p", "-t", aptArchives}, missing...)...); rc != 0 {
 		return fmt.Errorf("copying debs into %s exited with %d", aptArchives, rc)
 	}
-	e.log.Logf("event=cache-hit what=apt path=%s count=%d", e.cache.AptDir(), len(missing))
+	e.log.Logf("event=cache-hit what=apt path=%s count=%d", e.cache.AptDir(cache.Release()), len(missing))
 	return nil
 }
 
@@ -572,7 +587,7 @@ func collectDebs(e *env) error {
 	if err != nil {
 		return err
 	}
-	cached, err := debs(e.cache.AptDir())
+	cached, err := debs(e.cache.AptDir(cache.Release()))
 	if err != nil {
 		return err
 	}
@@ -582,13 +597,13 @@ func collectDebs(e *env) error {
 		if cached[name] {
 			continue
 		}
-		if err := cache.CopyFile(filepath.Join(aptArchives, name), filepath.Join(e.cache.AptDir(), name)); err != nil {
+		if err := cache.CopyFile(filepath.Join(aptArchives, name), filepath.Join(e.cache.AptDir(cache.Release()), name)); err != nil {
 			return err
 		}
 		n++
 	}
 	if n > 0 {
-		e.log.Logf("event=cache-store what=apt path=%s count=%d", e.cache.AptDir(), n)
+		e.log.Logf("event=cache-store what=apt path=%s count=%d", e.cache.AptDir(cache.Release()), n)
 	}
 	return nil
 }

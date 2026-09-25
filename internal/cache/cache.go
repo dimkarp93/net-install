@@ -17,9 +17,10 @@ const wok = 0x2
 
 type Cache struct {
 	root string
+	ro   bool
 }
 
-func Open(root string) (*Cache, error) {
+func Open(root string, ro bool) (*Cache, error) {
 	unavailable := func(reason string) error {
 		return fmt.Errorf("cache dir %s is unavailable (%s): pass --cache-dir DIR or --no-cache", root, reason)
 	}
@@ -28,6 +29,8 @@ func Open(root string) (*Cache, error) {
 	switch {
 	case err == nil && !st.IsDir():
 		return nil, unavailable("not a directory")
+	case os.IsNotExist(err) && ro:
+		return nil, unavailable("does not exist")
 	case os.IsNotExist(err):
 		if _, perr := os.Stat(filepath.Dir(root)); perr != nil {
 			return nil, unavailable("parent does not exist")
@@ -39,15 +42,17 @@ func Open(root string) (*Cache, error) {
 		return nil, unavailable(err.Error())
 	}
 
-	if syscall.Access(root, wok) != nil {
+	if !ro && syscall.Access(root, wok) != nil {
 		return nil, unavailable("not writable")
 	}
-	return &Cache{root: root}, nil
+	return &Cache{root: root, ro: ro}, nil
 }
 
 func (c *Cache) Root() string { return c.root }
 
-func (c *Cache) AptDir() string { return filepath.Join(c.root, "apt") }
+func (c *Cache) ReadOnly() bool { return c.ro }
+
+func (c *Cache) AptDir(release string) string { return filepath.Join(c.root, "apt", release) }
 
 func (c *Cache) FilePath(raw string) (string, error) {
 	host, p, query, err := split(raw)

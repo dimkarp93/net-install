@@ -56,6 +56,7 @@ net-install script --shell bash https://just.systems/install.sh --to ~/.local/bi
 | `NET_CACHE_DIR` | `--cache-dir` | `/mnt/hdd/auto-distrib` | каталог кэша |
 | `NET_NO_CACHE` | `--no-cache` | выкл | работать без кэша |
 | `NET_FORCE_UPDATE` | `--force-update` | выкл | скачать заново и обновить кэш |
+| `NET_CACHE_RO` | `--cache-ro` | выкл | брать из кэша, но ничего в него не писать |
 
 Флаг сильнее переменной, переменная сильнее умолчания. `net-install env` показывает,
 что именно действует сейчас:
@@ -82,7 +83,7 @@ NET_CONNECT_TIMEOUT=20 (default)
   files/<host>/<path>            fetch, download, script
   files/<host>/<path>.sha256     сверяется перед каждым использованием
   git/<host>/<owner>/<repo>/     shallow-зеркало для clone
-  apt/*.deb                      пакеты, скачанные apt-get
+  apt/<id>-<version>-<arch>/     пакеты, скачанные apt-get, например apt/debian-13-amd64/
 ```
 
 URL с query-строкой получает к имени суффикс `@<первые 12 символов sha256(query)>`.
@@ -97,11 +98,19 @@ URL с query-строкой получает к имени суффикс `@<п�
   зеркало делает `git fetch`, существующий `DEST` у `clone` клонируется повторно, у `apt`
   пропускается подкладывание `.deb`. Если обновить файл или зеркало не удалось, а
   старая копия есть, используется она (`event=cache-stale`).
+- `.deb` раскладываются по дистрибутивам (`ID` и `VERSION_ID` из `/etc/os-release`,
+  для testing — `VERSION_CODENAME`), поэтому один кэш можно делить между Debian 12,
+  Debian 13 и Ubuntu.
+- `--cache-ro` — режим для потребителей общего кэша, например тестовых VM, которым он
+  смонтирован только на чтение. Попадания работают как обычно. При промахе файл
+  качается из сети мимо кэша, в лог пишется `event=cache-miss`, в кэш ничего не
+  записывается: ни файлы, ни git-зеркала, ни `.deb`. Каталог должен существовать, право
+  на запись не требуется. `--force-update` вместе с `--cache-ro` — ошибка употребления.
 - Если каталога нет, net-install создаёт его, но только когда существует родитель. Если
   каталог создать нельзя или он недоступен на запись, команда падает с кодом 1 и ничего
   не скачивает. Работать без кэша можно только явно, через `--no-cache`.
 
-Дополнительные события лога: `cache-hit`, `cache-store`, `cache-stale`.
+Дополнительные события лога: `cache-hit`, `cache-store`, `cache-stale`, `cache-miss`.
 
 ## Что повторяется, а что нет
 
@@ -124,7 +133,7 @@ URL с query-строкой получает к имени суффикс `@<п�
 ```
 
 События: `start`, `ok`, `retry`, `fail`, `size`, `install`, `exec`, `done`, `skip`,
-`cache-hit`, `cache-store`, `cache-stale`.
+`cache-hit`, `cache-store`, `cache-stale`, `cache-miss`.
 
 ## Коды возврата
 

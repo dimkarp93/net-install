@@ -30,7 +30,9 @@ Cache flags (fetch, download, script, clone, apt):
   --cache-dir DIR        artifact cache                (NET_CACHE_DIR, default /mnt/hdd/auto-distrib)
   --no-cache             bypass the cache              (NET_NO_CACHE)
   --force-update         download again, refresh cache (NET_FORCE_UPDATE)
-  A missing or read-only cache dir is an error: pass --cache-dir or --no-cache.
+  --cache-ro             read-only: use hits, fetch     (NET_CACHE_RO)
+                         misses without storing them
+  A missing cache dir, or a read-only one without --cache-ro, is an error.
 
 download:
   --mode MODE            permissions on DEST           (NET_MODE, default 0644)

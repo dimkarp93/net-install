@@ -27,6 +27,7 @@ const (
 	CacheDir       = "cache-dir"
 	NoCache        = "no-cache"
 	ForceUpdate    = "force-update"
+	CacheRO        = "cache-ro"
 )
 
 const DefaultCacheDir = "/mnt/hdd/auto-distrib"
@@ -43,9 +44,10 @@ var Env = map[string]string{
 	CacheDir:       "NET_CACHE_DIR",
 	NoCache:        "NET_NO_CACHE",
 	ForceUpdate:    "NET_FORCE_UPDATE",
+	CacheRO:        "NET_CACHE_RO",
 }
 
-var order = []string{Retries, Delay, ConnectTimeout, SpeedLimit, SpeedTime, Shell, Mode, RetryAll, CacheDir, NoCache, ForceUpdate}
+var order = []string{Retries, Delay, ConnectTimeout, SpeedLimit, SpeedTime, Shell, Mode, RetryAll, CacheDir, NoCache, ForceUpdate, CacheRO}
 
 type Config struct {
 	Retries        int
@@ -61,6 +63,7 @@ type Config struct {
 	CacheDir       string
 	NoCache        bool
 	ForceUpdate    bool
+	CacheRO        bool
 
 	source map[string]Source
 }
@@ -132,6 +135,8 @@ func (c *Config) Set(name, value string, src Source) error {
 		return c.setBool(&c.NoCache, name, value, src)
 	case ForceUpdate:
 		return c.setBool(&c.ForceUpdate, name, value, src)
+	case CacheRO:
+		return c.setBool(&c.CacheRO, name, value, src)
 	case CacheDir:
 		if value == "" {
 			return fmt.Errorf("%s: expected a path", name)
@@ -205,6 +210,8 @@ func (c *Config) value(name string) string {
 		return boolString(c.NoCache)
 	case ForceUpdate:
 		return boolString(c.ForceUpdate)
+	case CacheRO:
+		return boolString(c.CacheRO)
 	}
 	return ""
 }

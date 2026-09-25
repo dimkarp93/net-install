@@ -38,10 +38,10 @@ func TestLayout(t *testing.T) {
 
 func TestOpen(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "cache")
-	if _, err := Open(root); err != nil {
+	if _, err := Open(root, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(filepath.Join(t.TempDir(), "a", "b")); err == nil {
+	if _, err := Open(filepath.Join(t.TempDir(), "a", "b"), false); err == nil {
 		t.Fatal("a cache without a parent was accepted")
 	}
 }
@@ -62,5 +62,28 @@ func TestStoreAndValid(t *testing.T) {
 	os.WriteFile(file, []byte("other"), 0o644)
 	if Valid(file) {
 		t.Fatal("a changed file is still valid")
+	}
+}
+
+func TestRelease(t *testing.T) {
+	old := OSRelease
+	t.Cleanup(func() { OSRelease = old })
+	dir := t.TempDir()
+
+	OSRelease = filepath.Join(dir, "a")
+	os.WriteFile(OSRelease, []byte("PRETTY_NAME=\"Debian GNU/Linux 12\"\nID=debian\nVERSION_ID=\"12\"\n"), 0o644)
+	if got := Release(); got != "debian-12-"+debArch() {
+		t.Fatalf("got %q", got)
+	}
+
+	OSRelease = filepath.Join(dir, "b")
+	os.WriteFile(OSRelease, []byte("ID=debian\nVERSION_CODENAME=forky\n"), 0o644)
+	if got := Release(); got != "debian-forky-"+debArch() {
+		t.Fatalf("got %q", got)
+	}
+
+	OSRelease = filepath.Join(dir, "missing")
+	if got := Release(); got != "unknown-"+debArch() {
+		t.Fatalf("got %q", got)
 	}
 }
