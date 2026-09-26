@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/dimkarp93/net-install/internal/cache"
 	"github.com/dimkarp93/net-install/internal/config"
@@ -384,5 +385,73 @@ func TestReadOnlyAptDoesNotCollect(t *testing.T) {
 	entries, _ := os.ReadDir(root)
 	if len(entries) != 0 {
 		t.Fatal("a read-only apt run collected debs")
+	}
+}
+
+func TestForceSinceKeepsFreshEntries(t *testing.T) {
+	quiet(t)
+	srv, hits := counting(t, func(n int64) string { return fmt.Sprintf("v%d", n) })
+	dest := filepath.Join(t.TempDir(), "out")
+	url := srv.URL + "/f"
+
+	Run([]string{"fetch", url, dest})
+	since := fmt.Sprint(time.Now().Unix() + 3600)
+	if rc := Run([]string{"fetch", "--force-update", "--force-since", since, url, dest}); rc != 0 {
+		t.Fatalf("rc=%d", rc)
+	}
+	if got := read(t, dest); got != "v2" {
+		t.Fatalf("an old entry was not refreshed, got %q", got)
+	}
+
+	since = fmt.Sprint(time.Now().Unix() - 3600)
+	Run([]string{"fetch", "--force-update", "--force-since", since, url, dest})
+	if got := read(t, dest); got != "v2" || hits.Load() != 2 {
+		t.Fatalf("a fresh entry was downloaded again, got %q after %d hits", got, hits.Load())
+	}
+}
+
+func TestForceSinceKeepsAFreshMirror(t *testing.T) {
+	quiet(t)
+	root := t.TempDir()
+	url, commit := gitRepo(t, root)
+
+	Run([]string{"clone", url, filepath.Join(root, "a")})
+	commit("v2")
+	since := fmt.Sprint(time.Now().Unix() - 3600)
+	dest := filepath.Join(root, "b")
+	if rc := Run([]string{"clone", "--force-update", "--force-since", since, url, dest}); rc != 0 {
+		t.Fatalf("rc=%d", rc)
+	}
+	if got := read(t, filepath.Join(dest, "readme")); got != "v1" {
+		t.Fatalf("a fresh mirror was fetched again, got %q", got)
+	}
+}
+
+func TestAptDownloadOnly(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("runs without sudo as root")
+	}
+	archives := t.TempDir()
+	old := aptArchives
+	aptArchives = archives
+	t.Cleanup(func() { aptArchives = old })
+
+	c, err := cache.Open(t.TempDir(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := &fakeRunner{}
+	devnull, _ := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	defer devnull.Close()
+	cfg := config.New()
+	cfg.DownloadOnly = true
+	e := &env{cfg: cfg, cache: c, log: netlog.New(devnull, nil), run: run, out: devnull, err: devnull}
+
+	if rc := cmdApt(e, []string{"zsh"}); rc != 0 {
+		t.Fatalf("rc=%d", rc)
+	}
+	last := strings.Join(run.calls[len(run.calls)-1], " ")
+	if !strings.HasPrefix(last, "sudo apt-get install -y --download-only ") {
+		t.Fatalf("apt call: %s", last)
 	}
 }

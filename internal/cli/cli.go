@@ -53,7 +53,7 @@ var netSpec = spec{
 }
 
 var cacheSpec = spec{
-	value: map[string]bool{config.CacheDir: true},
+	value: map[string]bool{config.CacheDir: true, config.ForceSince: true},
 	flag:  map[string]bool{config.NoCache: true, config.ForceUpdate: true, config.CacheRO: true},
 }
 
@@ -75,7 +75,9 @@ func specFor(command string) (spec, bool) {
 	}
 
 	switch command {
-	case "fetch", "apt":
+	case "fetch":
+	case "apt":
+		s.flag[config.DownloadOnly] = true
 	case "download":
 		s.value[config.Mode] = true
 	case "script":
@@ -222,7 +224,7 @@ func obtain(e *env, url string) (string, func(), error) {
 			return "", nil, &localError{err}
 		}
 		have := cache.Valid(file)
-		if have && !e.cfg.ForceUpdate {
+		if have && (!e.cfg.ForceUpdate || fresh(e, file)) {
 			e.log.Logf("event=cache-hit what=%s path=%s", url, file)
 			return file, func() {}, nil
 		}
@@ -444,7 +446,7 @@ func mirrorFor(e *env, url string) (string, error) {
 	}
 
 	if st, err := os.Stat(filepath.Join(mirror, ".git")); err == nil && st.IsDir() {
-		if !e.cfg.ForceUpdate {
+		if !e.cfg.ForceUpdate || fresh(e, mirror) {
 			e.log.Logf("event=cache-hit what=%s path=%s", url, mirror)
 			return mirror, nil
 		}
@@ -452,6 +454,7 @@ func mirrorFor(e *env, url string) (string, error) {
 			e.log.Logf("event=cache-stale what=%s path=%s", url, mirror)
 			return mirror, nil
 		}
+		touch(mirror)
 		e.log.Logf("event=cache-store what=%s path=%s", url, mirror)
 		return mirror, nil
 	}
@@ -479,6 +482,7 @@ func mirrorFor(e *env, url string) (string, error) {
 	if err := os.Rename(tmp, mirror); err != nil {
 		return "", &localError{err}
 	}
+	touch(mirror)
 	e.log.Logf("event=cache-store what=%s path=%s", url, mirror)
 	return mirror, nil
 }
@@ -511,11 +515,14 @@ func cmdApt(e *env, pkgs []string) int {
 		}
 	}
 
-	args := append([]string{
-		"apt-get", "install", "-y",
+	args := []string{"apt-get", "install", "-y"}
+	if e.cfg.DownloadOnly {
+		args = append(args, "--download-only")
+	}
+	args = append(append(args,
 		"-o", "APT::Keep-Downloaded-Packages=true",
-		"-o", "Acquire::Retries=" + strconv.Itoa(e.cfg.Retries),
-	}, pkgs...)
+		"-o", "Acquire::Retries="+strconv.Itoa(e.cfg.Retries),
+	), pkgs...)
 	e.log.Logf("event=exec what=apt packages=%s", strings.Join(pkgs, ","))
 	rc := runRoot(e, args...)
 	e.log.Logf("event=done what=apt rc=%d", rc)
@@ -529,6 +536,19 @@ func cmdApt(e *env, pkgs []string) int {
 		}
 	}
 	return 0
+}
+
+func fresh(e *env, path string) bool {
+	if e.cfg.ForceSince <= 0 {
+		return false
+	}
+	st, err := os.Stat(path)
+	return err == nil && st.ModTime().Unix() >= int64(e.cfg.ForceSince)
+}
+
+func touch(path string) {
+	now := time.Now()
+	os.Chtimes(path, now, now)
 }
 
 func runRoot(e *env, args ...string) int {

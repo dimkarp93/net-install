@@ -14,7 +14,8 @@ Commands:
   download [flags] URL DEST     download into a temporary file, then install it into DEST
   script [flags] URL [ARG...]   download a script and run it; ARG go to the script
   clone [flags] URL DEST        git clone --depth 1 with retries; skips an existing DEST
-  apt [flags] PKG...            sudo apt-get install -y PKG, reusing cached .deb files
+  apt [flags] PKG...            sudo apt-get install -y PKG, reusing cached .deb files;
+                                --download-only fetches them without installing
   log KEY=VALUE...              print one log line, no network
   env                           print the effective NET_* values and where they come from
 
@@ -32,6 +33,8 @@ Cache flags (fetch, download, script, clone, apt):
   --force-update         download again, refresh cache (NET_FORCE_UPDATE)
   --cache-ro             read-only: use hits, fetch     (NET_CACHE_RO)
                          misses without storing them
+  --force-since UNIX     with --force-update, keep      (NET_FORCE_SINCE)
+                         entries refreshed after UNIX
   A missing cache dir, or a read-only one without --cache-ro, is an error.
 
 download:
