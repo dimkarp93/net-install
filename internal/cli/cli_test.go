@@ -237,3 +237,19 @@ func TestEnvsReportsSourceAndValue(t *testing.T) {
 	}
 }
 
+func TestCompletionScriptMentionsTheBinary(t *testing.T) {
+	quiet(t)
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	rc := Run([]string{"completion", "bash"})
+	w.Close()
+	os.Stdout = old
+	out, _ := io.ReadAll(r)
+	if rc != 0 || !strings.Contains(string(out), "net-install __complete") {
+		t.Fatalf("rc=%d out=%s", rc, out)
+	}
+}

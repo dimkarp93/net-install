@@ -107,6 +107,10 @@ func Run(args []string) int {
 		return 2
 	}
 
+	if code, ok := completionSpec.Handle(e.out, e.err, args); ok {
+		return code
+	}
+
 	if args[0] == "-h" || args[0] == "--help" {
 		printUsage(e.out)
 		return 0

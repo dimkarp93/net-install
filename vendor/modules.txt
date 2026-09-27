@@ -2,3 +2,5 @@
 ## explicit; go 1.24
 github.com/dimkarp93/install-libs/buildinfo
 github.com/dimkarp93/install-libs/envflag
+github.com/dimkarp93/install-libs/shellcomplete
+github.com/dimkarp93/install-libs/xdgpath
