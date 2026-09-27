@@ -111,7 +111,7 @@ func Run(args []string) int {
 		return code
 	}
 
-	if args[0] == "-h" || args[0] == "--help" {
+	if args[0] == "-h" || args[0] == "--help" || args[0] == "-help" || args[0] == "help" {
 		printUsage(e.out)
 		return 0
 	}
