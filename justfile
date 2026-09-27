@@ -90,12 +90,8 @@ _bump-commit level:
     fi
     git commit -q -m "bump {{level}}" -- versions.txt
     git tag "v$v"
-    rc=0
-    for r in $(git remote); do
-        git push -q "$r" HEAD --tags || { echo "push to $r failed" >&2; rc=1; }
-    done
+    git push -q origin HEAD --tags
     echo "Tagged v$v"
-    exit "$rc"
 
 release level="patch":
     #!/usr/bin/env sh
