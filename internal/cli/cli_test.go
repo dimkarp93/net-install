@@ -2,11 +2,13 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -193,7 +195,7 @@ func TestUsageErrors(t *testing.T) {
 		{"fetch"},
 		{"fetch", "only-one"},
 		{"log"},
-		{"env", "extra"},
+		{"--envs", "extra"},
 		{"download", "--mode", "0999", "u", "d"},
 	}
 	for _, args := range cases {
@@ -206,7 +208,32 @@ func TestUsageErrors(t *testing.T) {
 func TestBadEnvIsAUsageError(t *testing.T) {
 	quiet(t)
 	t.Setenv("NET_RETRIES", "many")
-	if rc := Run([]string{"env"}); rc != 2 {
+	if rc := Run([]string{"--envs"}); rc != 2 {
 		t.Fatalf("rc=%d, want 2", rc)
 	}
 }
+
+func TestEnvsReportsSourceAndValue(t *testing.T) {
+	quiet(t)
+	t.Setenv("NET_RETRIES", "9")
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	rc := Run([]string{"--envs"})
+	w.Close()
+	os.Stdout = old
+	out, _ := io.ReadAll(r)
+	if rc != 0 {
+		t.Fatalf("rc=%d", rc)
+	}
+	if !strings.Contains(string(out), "NET_RETRIES=9 (env)") {
+		t.Fatalf("--envs output: %s", out)
+	}
+	if !strings.Contains(string(out), "NET_DELAY=0 (env)") {
+		t.Fatalf("--envs output: %s", out)
+	}
+}
+

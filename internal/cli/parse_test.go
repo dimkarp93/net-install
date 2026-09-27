@@ -108,7 +108,7 @@ func TestModeIsNotAcceptedOutsideDownload(t *testing.T) {
 
 func TestBuildinfoDoesNotSwallowSubcommands(t *testing.T) {
 	info := buildinfo.Info{Version: "0.1.0"}
-	for _, command := range []string{"fetch", "download", "script", "clone", "log", "env"} {
+	for _, command := range []string{"fetch", "download", "script", "clone", "log", "--envs"} {
 		if info.FHandle(os.Stdout, []string{command, "https://x", "--version"}) {
 			t.Fatalf("buildinfo swallowed %q", command)
 		}

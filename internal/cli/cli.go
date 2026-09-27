@@ -85,11 +85,6 @@ func specFor(command string) (spec, bool) {
 	case "clone":
 		s.value[config.Depth] = true
 		s.flag[config.Force] = true
-	case "env":
-		s.value[config.Mode] = true
-		s.value[config.Shell] = true
-		s.value[config.Depth] = true
-		s.flag[config.Force] = true
 	case "log":
 		return spec{value: map[string]bool{}, flag: map[string]bool{}}, true
 	default:
@@ -114,6 +109,17 @@ func Run(args []string) int {
 
 	if args[0] == "-h" || args[0] == "--help" {
 		printUsage(e.out)
+		return 0
+	}
+
+	if args[0] == "--envs" {
+		if len(args) != 1 {
+			return usageError(e, fmt.Errorf("--envs takes no arguments"))
+		}
+		if err := e.cfg.LoadEnv(os.LookupEnv); err != nil {
+			return usageError(e, err)
+		}
+		e.cfg.Fprint(e.out)
 		return 0
 	}
 
@@ -166,8 +172,6 @@ func Run(args []string) int {
 		return cmdApt(e, p.args)
 	case "log":
 		return cmdLog(e, p.args)
-	case "env":
-		return cmdEnv(e, p.args)
 	}
 	return 2
 }
@@ -633,16 +637,6 @@ func cmdLog(e *env, args []string) int {
 		return usageError(e, fmt.Errorf("log requires at least one KEY=VALUE"))
 	}
 	e.log.Log(strings.Join(args, " "))
-	return 0
-}
-
-func cmdEnv(e *env, args []string) int {
-	if len(args) != 0 {
-		return usageError(e, fmt.Errorf("env takes no arguments"))
-	}
-	for _, line := range e.cfg.Report() {
-		fmt.Fprintln(e.out, line)
-	}
 	return 0
 }
 

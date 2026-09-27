@@ -17,7 +17,9 @@ Commands:
   apt [flags] PKG...            sudo apt-get install -y PKG, reusing cached .deb files;
                                 --download-only fetches them without installing
   log KEY=VALUE...              print one log line, no network
-  env                           print the effective NET_* values and where they come from
+  completion bash|zsh           print a shell completion script, for: source <(net-install completion bash)
+  install-completions [SHELL]   install the completion script and wire it into ~/.bashrc / ~/.zshrc
+  uninstall-completions [SHELL] remove the installed completion script
 
 Network flags (fetch, download, script, clone):
   --retries N            number of attempts            (NET_RETRIES, default 5)
@@ -48,6 +50,7 @@ clone:
   --force                clone even if DEST exists
   With --force-update an existing DEST is cloned again as well.
 
+  --envs                 print the effective NET_* values and where they come from
   --version, -v          print the version
   --origin               print the repository this binary was built from
   --buildinfo            print the full build info
