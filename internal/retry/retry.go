@@ -19,6 +19,14 @@ type Options struct {
 	Sleep    func(time.Duration)
 }
 
+type run struct {
+	log      *netlog.Logger
+	all      bool
+	delay    int
+	label    string
+	attempts int
+}
+
 func Do(log *netlog.Logger, o Options, label string, fn func() error) error {
 	sleep := o.Sleep
 	if sleep == nil {
