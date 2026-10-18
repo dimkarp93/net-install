@@ -499,6 +499,13 @@ func cmdClone(e *env, args []string) int {
 	return 0
 }
 
+type cloneJob struct {
+	e       *env
+	src     string
+	dest    string
+	shallow bool
+}
+
 func cloneInto(e *env, src, dest string, shallow bool) error {
 	return retry.Do(e.log, retryOpts(e.cfg), "clone "+src, func() error {
 		if err := os.RemoveAll(dest); err != nil {
