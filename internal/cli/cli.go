@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -619,16 +620,8 @@ func cmdApt(e *env, pkgs []string) int {
 		}
 	}
 
-	args := []string{"apt-get", "install", "-y"}
-	if e.cfg.DownloadOnly {
-		args = append(args, "--download-only")
-	}
-	args = append(append(args,
-		"-o", "APT::Keep-Downloaded-Packages=true",
-		"-o", "Acquire::Retries="+strconv.Itoa(e.cfg.Retries),
-	), pkgs...)
 	e.log.Logf("event=exec what=apt packages=%s", strings.Join(pkgs, ","))
-	rc := runRoot(e, args...)
+	rc := runRoot(e, aptArgs(e.cfg, pkgs)...)
 	e.log.Logf("event=done what=apt rc=%d", rc)
 	if rc != 0 {
 		return rc
@@ -640,6 +633,18 @@ func cmdApt(e *env, pkgs []string) int {
 		}
 	}
 	return 0
+}
+
+func aptArgs(c *config.Config, pkgs []string) []string {
+	args := []string{"apt-get", "install", "-y"}
+	if c.DownloadOnly {
+		args = append(args, "--download-only")
+	}
+
+	return slices.Concat(args, []string{
+		"-o", "APT::Keep-Downloaded-Packages=true",
+		"-o", "Acquire::Retries=" + strconv.Itoa(c.Retries),
+	}, pkgs)
 }
 
 func fresh(e *env, path string) bool {
@@ -680,7 +685,8 @@ func debs(dir string) (map[string]bool, error) {
 }
 
 func preloadDebs(e *env) error {
-	cached, err := debs(e.cache.AptDir(cache.Release()))
+	dir := e.cache.AptDir(cache.Release())
+	cached, err := debs(dir)
 	if err != nil {
 		return err
 	}
@@ -689,12 +695,7 @@ func preloadDebs(e *env) error {
 		return err
 	}
 
-	var missing []string
-	for name := range cached {
-		if !present[name] {
-			missing = append(missing, filepath.Join(e.cache.AptDir(cache.Release()), name))
-		}
-	}
+	missing := missingDebs(cached, present, dir)
 	if len(missing) == 0 {
 		return nil
 	}
@@ -702,16 +703,27 @@ func preloadDebs(e *env) error {
 	if rc := runRoot(e, append([]string{"cp", "-p", "-t", aptArchives}, missing...)...); rc != 0 {
 		return fmt.Errorf("copying debs into %s exited with %d", aptArchives, rc)
 	}
-	e.log.Logf("event=cache-hit what=apt path=%s count=%d", e.cache.AptDir(cache.Release()), len(missing))
+	e.log.Logf("event=cache-hit what=apt path=%s count=%d", dir, len(missing))
 	return nil
 }
 
+func missingDebs(cached, present map[string]bool, dir string) []string {
+	var missing []string
+	for name := range cached {
+		if !present[name] {
+			missing = append(missing, filepath.Join(dir, name))
+		}
+	}
+	return missing
+}
+
 func collectDebs(e *env) error {
+	dir := e.cache.AptDir(cache.Release())
 	present, err := debs(aptArchives)
 	if err != nil {
 		return err
 	}
-	cached, err := debs(e.cache.AptDir(cache.Release()))
+	cached, err := debs(dir)
 	if err != nil {
 		return err
 	}
@@ -721,13 +733,14 @@ func collectDebs(e *env) error {
 		if cached[name] {
 			continue
 		}
-		if err := cache.CopyFile(filepath.Join(aptArchives, name), filepath.Join(e.cache.AptDir(cache.Release()), name)); err != nil {
+		if err := cache.CopyFile(filepath.Join(aptArchives, name), filepath.Join(dir, name)); err != nil {
 			return err
 		}
 		n++
 	}
+
 	if n > 0 {
-		e.log.Logf("event=cache-store what=apt path=%s count=%d", e.cache.AptDir(cache.Release()), n)
+		e.log.Logf("event=cache-store what=apt path=%s count=%d", dir, n)
 	}
 	return nil
 }
