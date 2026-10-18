@@ -28,37 +28,46 @@ type run struct {
 }
 
 func Do(log *netlog.Logger, o Options, label string, fn func() error) error {
-	sleep := o.Sleep
-	if sleep == nil {
-		sleep = time.Sleep
-	}
-	attempts := o.Attempts
-	if attempts < 1 {
-		attempts = 1
-	}
+	sleep := sleepFunc(o.Sleep)
+	r := run{log: log, all: o.All, delay: o.Delay, label: label, attempts: max(o.Attempts, 1)}
 
 	for attempt := 1; ; attempt++ {
-		log.Logf("event=start what=%s attempt=%d/%d", label, attempt, attempts)
+		log.Logf("event=start what=%s attempt=%d/%d", label, attempt, r.attempts)
 		started := time.Now()
 
 		err := fn()
 		seconds := time.Now().Unix() - started.Unix()
 
-		if err == nil {
-			log.Logf("event=ok what=%s attempt=%d seconds=%d", label, attempt, seconds)
-			return nil
-		}
-
-		rc := ExitCode(err)
-		if attempt >= attempts || !(o.All || Retryable(err)) {
-			log.Logf("event=fail what=%s attempts=%d rc=%d seconds=%d", label, attempt, rc, seconds)
+		if !r.retry(attempt, err, seconds) {
 			return err
 		}
-
-		log.Logf("event=retry what=%s attempt=%d/%d rc=%d seconds=%d sleep=%ds",
-			label, attempt, attempts, rc, seconds, o.Delay)
 		sleep(time.Duration(o.Delay) * time.Second)
 	}
+}
+
+func sleepFunc(sleep func(time.Duration)) func(time.Duration) {
+	if sleep == nil {
+		return time.Sleep
+	}
+
+	return sleep
+}
+
+func (r run) retry(attempt int, err error, seconds int64) bool {
+	if err == nil {
+		r.log.Logf("event=ok what=%s attempt=%d seconds=%d", r.label, attempt, seconds)
+		return false
+	}
+
+	rc := ExitCode(err)
+	if attempt >= r.attempts || !(r.all || Retryable(err)) {
+		r.log.Logf("event=fail what=%s attempts=%d rc=%d seconds=%d", r.label, attempt, rc, seconds)
+		return false
+	}
+
+	r.log.Logf("event=retry what=%s attempt=%d/%d rc=%d seconds=%d sleep=%ds",
+		r.label, attempt, r.attempts, rc, seconds, r.delay)
+	return true
 }
 
 func ExitCode(err error) int {
