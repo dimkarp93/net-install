@@ -4,6 +4,9 @@ github.com/dimkarp93/install-libs/buildinfo
 github.com/dimkarp93/install-libs/envflag
 github.com/dimkarp93/install-libs/shellcomplete
 github.com/dimkarp93/install-libs/xdgpath
+# github.com/dimkarp93/utils v0.1.1
+## explicit; go 1.27.2
+github.com/dimkarp93/utils/pkg/collections
 # github.com/stretchr/testify v1.12.1
 ## explicit; go 1.17
 github.com/stretchr/testify/assert
