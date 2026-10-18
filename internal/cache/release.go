@@ -10,32 +10,48 @@ import (
 var OSRelease = "/etc/os-release"
 
 func Release() string {
-	id, version := "unknown", ""
-	if f, err := os.Open(OSRelease); err == nil {
-		defer f.Close()
-		fields := map[string]string{}
-		sc := bufio.NewScanner(f)
-		for sc.Scan() {
-			k, v, ok := strings.Cut(sc.Text(), "=")
-			if ok {
-				fields[k] = strings.Trim(v, `"'`)
-			}
-		}
-		if fields["ID"] != "" {
-			id = fields["ID"]
-		}
-		version = fields["VERSION_ID"]
-		if version == "" {
-			version = fields["VERSION_CODENAME"]
-		}
-	}
+	fields := osReleaseFields(OSRelease)
 
-	parts := []string{id}
-	if version != "" {
+	parts := []string{releaseID(fields)}
+	if version := releaseVersion(fields); version != "" {
 		parts = append(parts, version)
 	}
 	parts = append(parts, debArch())
+
 	return strings.NewReplacer("/", "_", " ", "_").Replace(strings.Join(parts, "-"))
+}
+
+func osReleaseFields(path string) map[string]string {
+	fields := map[string]string{}
+	f, err := os.Open(path)
+	if err != nil {
+		return fields
+	}
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		if k, v, ok := strings.Cut(sc.Text(), "="); ok {
+			fields[k] = strings.Trim(v, `"'`)
+		}
+	}
+	return fields
+}
+
+func releaseID(fields map[string]string) string {
+	if id := fields["ID"]; id != "" {
+		return id
+	}
+
+	return "unknown"
+}
+
+func releaseVersion(fields map[string]string) string {
+	if version := fields["VERSION_ID"]; version != "" {
+		return version
+	}
+
+	return fields["VERSION_CODENAME"]
 }
 
 func debArch() string {
