@@ -1,6 +1,11 @@
 package config
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
 
 func lookup(m map[string]string) func(string) (string, bool) {
 	return func(k string) (string, bool) {
@@ -9,40 +14,54 @@ func lookup(m map[string]string) func(string) (string, bool) {
 	}
 }
 
+type valueSource struct {
+	Value  any
+	Source Source
+}
+
 func TestDefaultsMatchTheShellLibrary(t *testing.T) {
 	c := New()
-	if c.Retries != 5 || c.Delay != 5 || c.ConnectTimeout != 20 {
-		t.Fatalf("retries/delay/connect: %d/%d/%d", c.Retries, c.Delay, c.ConnectTimeout)
-	}
-	if c.SpeedLimit != 1024 || c.SpeedTime != 30 {
-		t.Fatalf("speed: %d/%d", c.SpeedLimit, c.SpeedTime)
-	}
-	if c.Shell != "sh" || c.Mode != "0644" {
-		t.Fatalf("shell/mode: %q/%q", c.Shell, c.Mode)
-	}
+
+	got := []any{c.Retries, c.Delay, c.ConnectTimeout, c.SpeedLimit, c.SpeedTime, c.Shell, c.Mode, c.Depth}
+
+	assert.Equal(t, []any{5, 5, 20, 1024, 30, "sh", "0644", 1}, got)
 }
 
 func TestFlagBeatsEnvBeatsDefault(t *testing.T) {
 	c := New()
-	if err := c.LoadEnv(lookup(map[string]string{"NET_RETRIES": "9", "NET_SHELL": "bash"})); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.Set(Delay, "2", SourceFlag); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, c.LoadEnv(lookup(map[string]string{"NET_RETRIES": "9", "NET_SHELL": "bash"})))
+	require.NoError(t, c.Set(Delay, "2", SourceFlag))
 
-	if c.Retries != 9 || c.Source(Retries) != SourceEnv {
-		t.Fatalf("retries=%d source=%s", c.Retries, c.Source(Retries))
+	cases := []struct {
+		name string
+		got  valueSource
+		want valueSource
+	}{
+		{name: Retries, got: valueSource{c.Retries, c.Source(Retries)}, want: valueSource{9, SourceEnv}},
+		{name: Shell, got: valueSource{c.Shell, c.Source(Shell)}, want: valueSource{"bash", SourceEnv}},
+		{name: Delay, got: valueSource{c.Delay, c.Source(Delay)}, want: valueSource{2, SourceFlag}},
+		{name: SpeedTime, got: valueSource{c.SpeedTime, c.Source(SpeedTime)}, want: valueSource{30, SourceDefault}},
 	}
-	if c.Shell != "bash" || c.Source(Shell) != SourceEnv {
-		t.Fatalf("shell=%q source=%s", c.Shell, c.Source(Shell))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, tc.got)
+		})
 	}
-	if c.Delay != 2 || c.Source(Delay) != SourceFlag {
-		t.Fatalf("delay=%d source=%s", c.Delay, c.Source(Delay))
-	}
-	if c.SpeedTime != 30 || c.Source(SpeedTime) != SourceDefault {
-		t.Fatalf("speed-time=%d source=%s", c.SpeedTime, c.Source(SpeedTime))
-	}
+}
+
+func TestFlagOnlyOptionsTrackTheirSource(t *testing.T) {
+	c := New()
+	require.NoError(t, c.Set(Depth, "3", SourceFlag))
+
+	t.Run("value", func(t *testing.T) {
+		assert.Equal(t, 3, c.Depth)
+	})
+	t.Run("set source", func(t *testing.T) {
+		assert.Equal(t, SourceFlag, c.Source(Depth))
+	})
+	t.Run("unset source", func(t *testing.T) {
+		assert.Equal(t, SourceDefault, c.Source(Force))
+	})
 }
 
 func TestBadValuesAreRejected(t *testing.T) {
@@ -52,44 +71,42 @@ func TestBadValuesAreRejected(t *testing.T) {
 		{Delay, "-1"},
 		{Mode, "0999"},
 		{RetryAll, "maybe"},
+		{Depth, "x"},
+		{Force, "maybe"},
+		{CacheDir, ""},
 	}
 	for _, tc := range cases {
-		if err := New().Set(tc.name, tc.value, SourceFlag); err == nil {
-			t.Fatalf("%s=%q was accepted", tc.name, tc.value)
-		}
+		t.Run(tc.name+"="+tc.value, func(t *testing.T) {
+			assert.Error(t, New().Set(tc.name, tc.value, SourceFlag))
+		})
 	}
 }
 
 func TestEnvErrorNamesTheVariable(t *testing.T) {
 	err := New().LoadEnv(lookup(map[string]string{"NET_SPEED_LIMIT": "fast"}))
-	if err == nil {
-		t.Fatal("expected an error")
-	}
-	if got := err.Error(); got[:len("NET_SPEED_LIMIT")] != "NET_SPEED_LIMIT" {
-		t.Fatalf("error does not name the variable: %s", got)
-	}
+
+	require.Error(t, err)
+	assert.Regexp(t, `^NET_SPEED_LIMIT`, err.Error())
 }
 
 func TestParseMode(t *testing.T) {
 	m, err := ParseMode("0755")
-	if err != nil || m != 0o755 {
-		t.Fatalf("got %o, %v", m, err)
-	}
+
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0o755), m)
 }
 
-func TestCacheOptions(t *testing.T) {
+func TestCacheDefaults(t *testing.T) {
 	c := New()
-	if c.CacheDir != "/mnt/hdd/auto-distrib" || c.NoCache || c.ForceUpdate {
-		t.Fatalf("defaults: %q %v %v", c.CacheDir, c.NoCache, c.ForceUpdate)
-	}
+
+	assert.Equal(t, []any{"/mnt/hdd/auto-distrib", false, false}, []any{c.CacheDir, c.NoCache, c.ForceUpdate})
+}
+
+func TestCacheOptionsFromEnv(t *testing.T) {
+	c := New()
+
 	err := c.LoadEnv(lookup(map[string]string{"NET_CACHE_DIR": "/x", "NET_FORCE_UPDATE": "1", "NET_NO_CACHE": "yes"}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.CacheDir != "/x" || !c.ForceUpdate || !c.NoCache {
-		t.Fatalf("env: %q %v %v", c.CacheDir, c.ForceUpdate, c.NoCache)
-	}
-	if New().Set(CacheDir, "", SourceFlag) == nil {
-		t.Fatal("an empty cache dir was accepted")
-	}
+
+	require.NoError(t, err)
+	assert.Equal(t, []any{"/x", true, true}, []any{c.CacheDir, c.ForceUpdate, c.NoCache})
 }
