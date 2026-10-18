@@ -16,6 +16,12 @@ type stallReader struct {
 	once sync.Once
 }
 
+type speedWindow struct {
+	ring   []int64
+	idx    int
+	filled int
+}
+
 func newStallReader(r io.Reader, limit, window int, tick time.Duration, cancel func()) *stallReader {
 	s := &stallReader{r: r, done: make(chan struct{})}
 	if limit <= 0 || window <= 0 || tick <= 0 {
