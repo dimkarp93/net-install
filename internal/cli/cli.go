@@ -19,6 +19,7 @@ import (
 	"github.com/dimkarp93/net-install/internal/netlog"
 	"github.com/dimkarp93/net-install/internal/retry"
 	"github.com/dimkarp93/net-install/internal/runner"
+	"github.com/dimkarp93/utils/pkg/collections"
 )
 
 type env struct {
@@ -675,13 +676,18 @@ func debs(dir string) (map[string]bool, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]bool{}
-	for _, en := range entries {
-		if en.Type().IsRegular() && strings.HasSuffix(en.Name(), ".deb") {
-			out[en.Name()] = true
-		}
-	}
-	return out, nil
+	names := collections.Map(collections.Filter(entries, isDeb), os.DirEntry.Name)
+	return collections.ToSet(names), nil
+}
+
+func isDeb(en os.DirEntry) bool {
+	return en.Type().IsRegular() && strings.HasSuffix(en.Name(), ".deb")
+}
+
+func absentDebs(from, in map[string]bool) []string {
+	return collections.Filter(collections.SortedKeys(from), func(name string) bool {
+		return !in[name]
+	})
 }
 
 func preloadDebs(e *env) error {
@@ -708,13 +714,9 @@ func preloadDebs(e *env) error {
 }
 
 func missingDebs(cached, present map[string]bool, dir string) []string {
-	var missing []string
-	for name := range cached {
-		if !present[name] {
-			missing = append(missing, filepath.Join(dir, name))
-		}
-	}
-	return missing
+	return collections.Map(absentDebs(cached, present), func(name string) string {
+		return filepath.Join(dir, name)
+	})
 }
 
 func collectDebs(e *env) error {
@@ -728,19 +730,15 @@ func collectDebs(e *env) error {
 		return err
 	}
 
-	n := 0
-	for name := range present {
-		if cached[name] {
-			continue
-		}
+	added := absentDebs(present, cached)
+	for _, name := range added {
 		if err := cache.CopyFile(filepath.Join(aptArchives, name), filepath.Join(dir, name)); err != nil {
 			return err
 		}
-		n++
 	}
 
-	if n > 0 {
-		e.log.Logf("event=cache-store what=apt path=%s count=%d", dir, n)
+	if len(added) > 0 {
+		e.log.Logf("event=cache-store what=apt path=%s count=%d", dir, len(added))
 	}
 	return nil
 }
