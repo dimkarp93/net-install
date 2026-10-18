@@ -72,71 +72,93 @@ type boolParser struct {
 }
 
 func New() *Config {
-	c := &Config{Depth: 1, source: map[string]Source{}}
-	c.opts = envflag.New("NET_",
+	c := &Config{
+		Retries:        5,
+		Delay:          5,
+		ConnectTimeout: 20,
+		SpeedLimit:     1024,
+		SpeedTime:      30,
+		Shell:          "sh",
+		Mode:           "0644",
+		CacheDir:       DefaultCacheDir,
+		Depth:          1,
+		source:         map[string]Source{},
+	}
+
+	c.opts = envflag.New("NET_", c.options()...)
+	return c
+}
+
+func (c *Config) options() []envflag.Option {
+	return []envflag.Option{
 		c.intOption(Retries, "5", &c.Retries, 1),
 		c.intOption(Delay, "5", &c.Delay, 0),
 		c.intOption(ConnectTimeout, "20", &c.ConnectTimeout, 0),
 		c.intOption(SpeedLimit, "1024", &c.SpeedLimit, 0),
 		c.intOption(SpeedTime, "30", &c.SpeedTime, 0),
-		envflag.Option{Name: Shell, Default: "sh", Parse: func(v string) error {
-			c.Shell = v
-			return nil
-		}},
-		envflag.Option{Name: Mode, Default: "0644", Parse: func(v string) error {
-			if _, err := ParseMode(v); err != nil {
-				return err
-			}
-			c.Mode = v
-			return nil
-		}},
+		envflag.Option{Name: Shell, Default: "sh", Parse: c.parseShell},
+		envflag.Option{Name: Mode, Default: "0644", Parse: c.parseMode},
 		c.boolOption(RetryAll, "0", &c.RetryAll),
-		envflag.Option{Name: CacheDir, Default: DefaultCacheDir, Parse: func(v string) error {
-			if v == "" {
-				return fmt.Errorf("%s: expected a path", CacheDir)
-			}
-			c.CacheDir = v
-			return nil
-		}},
+		envflag.Option{Name: CacheDir, Default: DefaultCacheDir, Parse: c.parseCacheDir},
 		c.boolOption(NoCache, "0", &c.NoCache),
 		c.boolOption(ForceUpdate, "0", &c.ForceUpdate),
 		c.boolOption(CacheRO, "0", &c.CacheRO),
 		c.intOption(ForceSince, "0", &c.ForceSince, 0),
-	)
-	c.Retries = 5
-	c.Delay = 5
-	c.ConnectTimeout = 20
-	c.SpeedLimit = 1024
-	c.SpeedTime = 30
-	c.Shell = "sh"
-	c.Mode = "0644"
-	c.CacheDir = DefaultCacheDir
-	return c
+	}
+}
+
+func (c *Config) parseShell(v string) error {
+	c.Shell = v
+	return nil
+}
+
+func (c *Config) parseMode(v string) error {
+	if _, err := ParseMode(v); err != nil {
+		return err
+	}
+
+	c.Mode = v
+	return nil
+}
+
+func (c *Config) parseCacheDir(v string) error {
+	if v == "" {
+		return fmt.Errorf("%s: expected a path", CacheDir)
+	}
+
+	c.CacheDir = v
+	return nil
 }
 
 func (c *Config) intOption(name, def string, dst *int, min int) envflag.Option {
-	return envflag.Option{Name: name, Default: def, Parse: func(v string) error {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return fmt.Errorf("%s: expected an integer, got %q", name, v)
-		}
-		if n < min {
-			return fmt.Errorf("%s: expected at least %d, got %d", name, min, n)
-		}
-		*dst = n
-		return nil
-	}}
+	return envflag.Option{Name: name, Default: def, Parse: intParser{name: name, dst: dst, min: min}.parse}
 }
 
 func (c *Config) boolOption(name, def string, dst *bool) envflag.Option {
-	return envflag.Option{Name: name, Default: def, Parse: func(v string) error {
-		b, err := envflag.ParseBool(v)
-		if err != nil {
-			return err
-		}
-		*dst = b
-		return nil
-	}}
+	return envflag.Option{Name: name, Default: def, Parse: boolParser{dst: dst}.parse}
+}
+
+func (p intParser) parse(v string) error {
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fmt.Errorf("%s: expected an integer, got %q", p.name, v)
+	}
+	if n < p.min {
+		return fmt.Errorf("%s: expected at least %d, got %d", p.name, p.min, n)
+	}
+
+	*p.dst = n
+	return nil
+}
+
+func (p boolParser) parse(v string) error {
+	b, err := envflag.ParseBool(v)
+	if err != nil {
+		return err
+	}
+
+	*p.dst = b
+	return nil
 }
 
 func (c *Config) LoadEnv(lookup func(string) (string, bool)) error {
@@ -156,24 +178,19 @@ func (c *Config) Set(name, value string, src Source) error {
 }
 
 func (c *Config) setInt(dst *int, name, value string, src Source, min int) error {
-	n, err := strconv.Atoi(value)
-	if err != nil {
-		return fmt.Errorf("%s: expected an integer, got %q", name, value)
+	if err := (intParser{name: name, dst: dst, min: min}).parse(value); err != nil {
+		return err
 	}
-	if n < min {
-		return fmt.Errorf("%s: expected at least %d, got %d", name, min, n)
-	}
-	*dst = n
+
 	c.source[name] = src
 	return nil
 }
 
 func (c *Config) setBool(dst *bool, name, value string, src Source) error {
-	b, err := envflag.ParseBool(value)
-	if err != nil {
+	if err := (boolParser{dst: dst}).parse(value); err != nil {
 		return err
 	}
-	*dst = b
+
 	c.source[name] = src
 	return nil
 }
