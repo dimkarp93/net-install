@@ -61,6 +61,16 @@ type Config struct {
 	source map[string]Source
 }
 
+type intParser struct {
+	name string
+	dst  *int
+	min  int
+}
+
+type boolParser struct {
+	dst *bool
+}
+
 func New() *Config {
 	c := &Config{Depth: 1, source: map[string]Source{}}
 	c.opts = envflag.New("NET_",
