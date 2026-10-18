@@ -27,10 +27,18 @@ func TestDefaultsMatchTheShellLibrary(t *testing.T) {
 	assert.Equal(t, []any{5, 5, 20, 1024, 30, "sh", "0644", 1}, got)
 }
 
-func TestFlagBeatsEnvBeatsDefault(t *testing.T) {
+func configured(t *testing.T, env map[string]string, name, value string) *Config {
+	t.Helper()
+
 	c := New()
-	require.NoError(t, c.LoadEnv(lookup(map[string]string{"NET_RETRIES": "9", "NET_SHELL": "bash"})))
-	require.NoError(t, c.Set(Delay, "2", SourceFlag))
+	require.NoError(t, c.LoadEnv(lookup(env)))
+	require.NoError(t, c.Set(name, value, SourceFlag))
+
+	return c
+}
+
+func TestFlagBeatsEnvBeatsDefault(t *testing.T) {
+	c := configured(t, map[string]string{"NET_RETRIES": "9", "NET_SHELL": "bash"}, Delay, "2")
 
 	cases := []struct {
 		name string
@@ -50,8 +58,7 @@ func TestFlagBeatsEnvBeatsDefault(t *testing.T) {
 }
 
 func TestFlagOnlyOptionsTrackTheirSource(t *testing.T) {
-	c := New()
-	require.NoError(t, c.Set(Depth, "3", SourceFlag))
+	c := configured(t, nil, Depth, "3")
 
 	t.Run("value", func(t *testing.T) {
 		assert.Equal(t, 3, c.Depth)

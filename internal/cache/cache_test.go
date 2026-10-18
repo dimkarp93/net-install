@@ -57,9 +57,17 @@ func TestGitPathWithoutRepository(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestOpen(t *testing.T) {
+func plainFile(t *testing.T) string {
+	t.Helper()
+
 	file := filepath.Join(t.TempDir(), "file")
 	require.NoError(t, os.WriteFile(file, nil, 0o644))
+
+	return file
+}
+
+func TestOpen(t *testing.T) {
+	file := plainFile(t)
 
 	cases := []struct {
 		name  string
