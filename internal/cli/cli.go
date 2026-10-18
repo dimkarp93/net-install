@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -60,20 +61,11 @@ var cacheSpec = spec{
 var aptArchives = "/var/cache/apt/archives"
 
 func specFor(command string) (spec, bool) {
-	s := spec{value: map[string]bool{}, flag: map[string]bool{}}
-	for k, v := range netSpec.value {
-		s.value[k] = v
-	}
-	for k, v := range netSpec.flag {
-		s.flag[k] = v
-	}
-	for k, v := range cacheSpec.value {
-		s.value[k] = v
-	}
-	for k, v := range cacheSpec.flag {
-		s.flag[k] = v
+	if command == "log" {
+		return spec{value: map[string]bool{}, flag: map[string]bool{}}, true
 	}
 
+	s := baseSpec()
 	switch command {
 	case "fetch":
 	case "apt":
@@ -85,12 +77,17 @@ func specFor(command string) (spec, bool) {
 	case "clone":
 		s.value[config.Depth] = true
 		s.flag[config.Force] = true
-	case "log":
-		return spec{value: map[string]bool{}, flag: map[string]bool{}}, true
 	default:
 		return s, false
 	}
 	return s, true
+}
+
+func baseSpec() spec {
+	s := spec{value: maps.Clone(netSpec.value), flag: maps.Clone(netSpec.flag)}
+	maps.Copy(s.value, cacheSpec.value)
+	maps.Copy(s.flag, cacheSpec.flag)
+	return s
 }
 
 func Run(args []string) int {
@@ -111,23 +108,31 @@ func Run(args []string) int {
 		return code
 	}
 
-	if args[0] == "-h" || args[0] == "--help" || args[0] == "-help" || args[0] == "help" {
+	switch args[0] {
+	case "-h", "--help", "-help", "help":
 		printUsage(e.out)
 		return 0
+	case "--envs":
+		return runEnvs(e, args[1:])
+	default:
+		return runCommand(e, args[0], args[1:])
+	}
+}
+
+func runEnvs(e *env, args []string) int {
+	if len(args) != 0 {
+		return usageError(e, fmt.Errorf("--envs takes no arguments"))
 	}
 
-	if args[0] == "--envs" {
-		if len(args) != 1 {
-			return usageError(e, fmt.Errorf("--envs takes no arguments"))
-		}
-		if err := e.cfg.LoadEnv(os.LookupEnv); err != nil {
-			return usageError(e, err)
-		}
-		e.cfg.Fprint(e.out)
-		return 0
+	if err := e.cfg.LoadEnv(os.LookupEnv); err != nil {
+		return usageError(e, err)
 	}
 
-	command := args[0]
+	e.cfg.Fprint(e.out)
+	return 0
+}
+
+func runCommand(e *env, command string, args []string) int {
 	s, ok := specFor(command)
 	if !ok {
 		fmt.Fprintf(e.err, "net-install: unknown command %q\n", command)
@@ -135,49 +140,73 @@ func Run(args []string) int {
 		return 2
 	}
 
-	if err := e.cfg.LoadEnv(os.LookupEnv); err != nil {
-		return usageError(e, err)
-	}
-
-	p, err := parse(args[1:], s)
+	rest, err := configure(e, args, s)
 	if err != nil {
 		return usageError(e, err)
 	}
+
+	if command != "log" {
+		if code, ok := openCache(e); !ok {
+			return code
+		}
+	}
+
+	return dispatch(e, command, rest)
+}
+
+func configure(e *env, args []string, s spec) ([]string, error) {
+	if err := e.cfg.LoadEnv(os.LookupEnv); err != nil {
+		return nil, err
+	}
+
+	p, err := parse(args, s)
+	if err != nil {
+		return nil, err
+	}
+
 	for _, f := range p.flags {
 		if err := e.cfg.Set(f.name, f.value, config.SourceFlag); err != nil {
-			return usageError(e, err)
+			return nil, err
 		}
 	}
+	return p.args, nil
+}
 
-	switch command {
-	case "fetch", "download", "script", "clone", "apt":
-		if !e.cfg.NoCache {
-			if e.cfg.CacheRO && e.cfg.ForceUpdate {
-				return usageError(e, fmt.Errorf("--force-update cannot refresh a --cache-ro cache"))
-			}
-			c, err := cache.Open(e.cfg.CacheDir, e.cfg.CacheRO)
-			if err != nil {
-				return fail(e, &localError{err})
-			}
-			e.cache = c
-		}
+func openCache(e *env) (int, bool) {
+	if e.cfg.NoCache {
+		return 0, true
 	}
 
+	if e.cfg.CacheRO && e.cfg.ForceUpdate {
+		return usageError(e, fmt.Errorf("--force-update cannot refresh a --cache-ro cache")), false
+	}
+
+	c, err := cache.Open(e.cfg.CacheDir, e.cfg.CacheRO)
+	if err != nil {
+		return fail(e, &localError{err}), false
+	}
+
+	e.cache = c
+	return 0, true
+}
+
+func dispatch(e *env, command string, args []string) int {
 	switch command {
 	case "fetch":
-		return cmdFetch(e, p.args)
+		return cmdFetch(e, args)
 	case "download":
-		return cmdDownload(e, p.args)
+		return cmdDownload(e, args)
 	case "script":
-		return cmdScript(e, p.args)
+		return cmdScript(e, args)
 	case "clone":
-		return cmdClone(e, p.args)
+		return cmdClone(e, args)
 	case "apt":
-		return cmdApt(e, p.args)
+		return cmdApt(e, args)
 	case "log":
-		return cmdLog(e, p.args)
+		return cmdLog(e, args)
+	default:
+		return 2
 	}
-	return 2
 }
 
 func usageError(e *env, err error) int {
