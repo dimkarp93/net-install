@@ -239,46 +239,60 @@ type fetcher struct {
 }
 
 func fetchInto(e *env, url string, f *os.File) error {
-	client := newClient(e.cfg)
-	var total int64
-
-	err := retry.Do(e.log, retryOpts(e.cfg), "fetch "+url, func() error {
-		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			return &localError{err}
-		}
-		if err := f.Truncate(0); err != nil {
-			return &localError{err}
-		}
-		n, err := client.Download(context.Background(), url, f)
-		total = n
-		return err
-	})
-	if err != nil {
+	ft := &fetcher{client: newClient(e.cfg), url: url, f: f}
+	if err := retry.Do(e.log, retryOpts(e.cfg), "fetch "+url, ft.attempt); err != nil {
 		return err
 	}
 
-	e.log.Logf("event=size what=fetch url=%s bytes=%d", url, total)
+	e.log.Logf("event=size what=fetch url=%s bytes=%d", url, ft.total)
 	return nil
+}
+
+func (ft *fetcher) attempt() error {
+	if _, err := ft.f.Seek(0, io.SeekStart); err != nil {
+		return &localError{err}
+	}
+	if err := ft.f.Truncate(0); err != nil {
+		return &localError{err}
+	}
+
+	n, err := ft.client.Download(context.Background(), ft.url, ft.f)
+	ft.total = n
+	return err
 }
 
 func obtain(e *env, url string) (string, func(), error) {
 	if e.cache != nil {
-		file, err := e.cache.FilePath(url)
-		if err != nil {
-			return "", nil, &localError{err}
-		}
-		have := cache.Valid(file)
-		if have && (!e.cfg.ForceUpdate || fresh(e, file)) {
-			e.log.Logf("event=cache-hit what=%s path=%s", url, file)
-			return file, func() {}, nil
-		}
-		if !e.cache.ReadOnly() {
-			file, err := storeFile(e, url, file, have)
+		if file, ok, err := fromCache(e, url); ok || err != nil {
 			return file, func() {}, err
 		}
-		e.log.Logf("event=cache-miss what=%s path=%s", url, file)
 	}
 
+	return fetchTemp(e, url)
+}
+
+func fromCache(e *env, url string) (string, bool, error) {
+	file, err := e.cache.FilePath(url)
+	if err != nil {
+		return "", false, &localError{err}
+	}
+
+	have := cache.Valid(file)
+	if have && (!e.cfg.ForceUpdate || fresh(e, file)) {
+		e.log.Logf("event=cache-hit what=%s path=%s", url, file)
+		return file, true, nil
+	}
+
+	if !e.cache.ReadOnly() {
+		file, err := storeFile(e, url, file, have)
+		return file, true, err
+	}
+
+	e.log.Logf("event=cache-miss what=%s path=%s", url, file)
+	return "", false, nil
+}
+
+func fetchTemp(e *env, url string) (string, func(), error) {
 	f, err := os.CreateTemp("", "net-install-*")
 	if err != nil {
 		return "", nil, &localError{err}
@@ -291,6 +305,7 @@ func obtain(e *env, url string) (string, func(), error) {
 		cleanup()
 		return "", nil, err
 	}
+
 	if err := f.Close(); err != nil {
 		cleanup()
 		return "", nil, &localError{err}
@@ -303,6 +318,7 @@ func storeFile(e *env, url, file string, have bool) (string, error) {
 	if err != nil {
 		return "", &localError{err}
 	}
+
 	if err := fetchInto(e, url, tmp); err != nil {
 		tmp.Close()
 		os.Remove(tmp.Name())
@@ -312,6 +328,7 @@ func storeFile(e *env, url, file string, have bool) (string, error) {
 		}
 		return "", err
 	}
+
 	if err := cache.Store(tmp, file); err != nil {
 		os.Remove(tmp.Name())
 		return "", &localError{err}
@@ -342,23 +359,24 @@ func cmdFetch(e *env, args []string) int {
 	}
 	defer cleanup()
 
+	if err := writeDest(e, src, dest); err != nil {
+		return fail(e, &localError{err})
+	}
+	return 0
+}
+
+func writeDest(e *env, src, dest string) error {
 	if dest == "-" {
-		if err := copyFrom(src, e.out); err != nil {
-			return fail(e, &localError{err})
-		}
-		return 0
+		return copyFrom(src, e.out)
 	}
 
 	f, err := os.Create(dest)
 	if err != nil {
-		return fail(e, &localError{err})
+		return err
 	}
 	defer f.Close()
 
-	if err := copyFrom(src, f); err != nil {
-		return fail(e, &localError{err})
-	}
-	return 0
+	return copyFrom(src, f)
 }
 
 func cmdDownload(e *env, args []string) int {
@@ -378,25 +396,40 @@ func cmdDownload(e *env, args []string) int {
 	}
 	defer target.Close()
 
+	if err := downloadInto(e, url, target); err != nil {
+		return fail(e, err)
+	}
+
+	if err := install(e, target, dest); err != nil {
+		return fail(e, &localError{err})
+	}
+	return 0
+}
+
+func downloadInto(e *env, url string, target *instfile.Target) error {
 	src, cleanup, err := obtain(e, url)
 	if err != nil {
-		return fail(e, err)
+		return err
 	}
 	defer cleanup()
 
 	if err := copyFrom(src, target.File()); err != nil {
-		return fail(e, &localError{err})
+		return &localError{err}
+	}
+	return nil
+}
+
+func install(e *env, target *instfile.Target, dest string) error {
+	err := target.Commit(e.run)
+	e.log.Logf("event=install what=%s mode=%s rc=%d", dest, e.cfg.Mode, commitRC(err))
+	return err
+}
+
+func commitRC(err error) int {
+	if err != nil {
+		return 1
 	}
 
-	rc := 0
-	cerr := target.Commit(e.run)
-	if cerr != nil {
-		rc = 1
-	}
-	e.log.Logf("event=install what=%s mode=%s rc=%d", dest, e.cfg.Mode, rc)
-	if cerr != nil {
-		return fail(e, &localError{cerr})
-	}
 	return 0
 }
 
