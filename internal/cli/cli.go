@@ -473,30 +473,32 @@ func cmdClone(e *env, args []string) int {
 		return usageError(e, err)
 	}
 
+	if err := clone(e, url, dest); err != nil {
+		return fail(e, err)
+	}
+	return 0
+}
+
+func clone(e *env, url, dest string) error {
 	if e.cache == nil {
-		if err := cloneInto(e, url, dest, true); err != nil {
-			return fail(e, err)
-		}
-		return 0
+		return cloneInto(e, url, dest, true)
 	}
 
 	mirror, err := mirrorFor(e, url)
 	if err != nil {
-		return fail(e, err)
+		return err
 	}
 	if mirror == "" {
-		if err := cloneInto(e, url, dest, true); err != nil {
-			return fail(e, err)
-		}
-		return 0
+		return cloneInto(e, url, dest, true)
 	}
+
 	if err := cloneInto(e, mirror, dest, false); err != nil {
-		return fail(e, err)
+		return err
 	}
 	if rc := e.run.Run("git", "-C", dest, "remote", "set-url", "origin", url); rc != 0 {
-		return fail(e, &gitError{rc})
+		return &gitError{rc}
 	}
-	return 0
+	return nil
 }
 
 type cloneJob struct {
@@ -507,20 +509,24 @@ type cloneJob struct {
 }
 
 func cloneInto(e *env, src, dest string, shallow bool) error {
-	return retry.Do(e.log, retryOpts(e.cfg), "clone "+src, func() error {
-		if err := os.RemoveAll(dest); err != nil {
-			return &localError{err}
-		}
-		args := []string{"clone"}
-		if shallow {
-			args = append(args, "--depth", strconv.Itoa(e.cfg.Depth))
-		}
-		rc := e.run.Run("git", gitNet(e, append(args, src, dest)...)...)
-		if rc != 0 {
-			return &gitError{rc}
-		}
-		return nil
-	})
+	job := cloneJob{e: e, src: src, dest: dest, shallow: shallow}
+	return retry.Do(e.log, retryOpts(e.cfg), "clone "+src, job.attempt)
+}
+
+func (j cloneJob) attempt() error {
+	if err := os.RemoveAll(j.dest); err != nil {
+		return &localError{err}
+	}
+
+	args := []string{"clone"}
+	if j.shallow {
+		args = append(args, "--depth", strconv.Itoa(j.e.cfg.Depth))
+	}
+
+	if rc := j.e.run.Run("git", gitNet(j.e, append(args, j.src, j.dest)...)...); rc != 0 {
+		return &gitError{rc}
+	}
+	return nil
 }
 
 func mirrorFor(e *env, url string) (string, error) {
@@ -530,17 +536,7 @@ func mirrorFor(e *env, url string) (string, error) {
 	}
 
 	if st, err := os.Stat(filepath.Join(mirror, ".git")); err == nil && st.IsDir() {
-		if !e.cfg.ForceUpdate || fresh(e, mirror) {
-			e.log.Logf("event=cache-hit what=%s path=%s", url, mirror)
-			return mirror, nil
-		}
-		if err := updateMirror(e, url, mirror); err != nil {
-			e.log.Logf("event=cache-stale what=%s path=%s", url, mirror)
-			return mirror, nil
-		}
-		touch(mirror)
-		e.log.Logf("event=cache-store what=%s path=%s", url, mirror)
-		return mirror, nil
+		return refreshMirror(e, url, mirror), nil
 	}
 
 	if e.cache.ReadOnly() {
@@ -548,27 +544,51 @@ func mirrorFor(e *env, url string) (string, error) {
 		return "", nil
 	}
 
-	if err := os.MkdirAll(filepath.Dir(mirror), 0o755); err != nil {
-		return "", &localError{err}
-	}
-	tmp, err := os.MkdirTemp(filepath.Dir(mirror), ".net-install-*")
-	if err != nil {
-		return "", &localError{err}
-	}
-	defer os.RemoveAll(tmp)
-
-	if err := cloneInto(e, url, tmp, true); err != nil {
+	if err := createMirror(e, url, mirror); err != nil {
 		return "", err
-	}
-	if err := os.RemoveAll(mirror); err != nil {
-		return "", &localError{err}
-	}
-	if err := os.Rename(tmp, mirror); err != nil {
-		return "", &localError{err}
 	}
 	touch(mirror)
 	e.log.Logf("event=cache-store what=%s path=%s", url, mirror)
 	return mirror, nil
+}
+
+func refreshMirror(e *env, url, mirror string) string {
+	if !e.cfg.ForceUpdate || fresh(e, mirror) {
+		e.log.Logf("event=cache-hit what=%s path=%s", url, mirror)
+		return mirror
+	}
+
+	if err := updateMirror(e, url, mirror); err != nil {
+		e.log.Logf("event=cache-stale what=%s path=%s", url, mirror)
+		return mirror
+	}
+
+	touch(mirror)
+	e.log.Logf("event=cache-store what=%s path=%s", url, mirror)
+	return mirror
+}
+
+func createMirror(e *env, url, mirror string) error {
+	if err := os.MkdirAll(filepath.Dir(mirror), 0o755); err != nil {
+		return &localError{err}
+	}
+	tmp, err := os.MkdirTemp(filepath.Dir(mirror), ".net-install-*")
+	if err != nil {
+		return &localError{err}
+	}
+	defer os.RemoveAll(tmp)
+
+	if err := cloneInto(e, url, tmp, true); err != nil {
+		return err
+	}
+
+	if err := os.RemoveAll(mirror); err != nil {
+		return &localError{err}
+	}
+	if err := os.Rename(tmp, mirror); err != nil {
+		return &localError{err}
+	}
+	return nil
 }
 
 func updateMirror(e *env, url, mirror string) error {
@@ -724,11 +744,13 @@ func removable(dest string) error {
 	if strings.TrimSpace(dest) == "" {
 		return fmt.Errorf("DEST is empty")
 	}
+
 	abs, err := filepath.Abs(dest)
 	if err != nil {
 		return err
 	}
 	abs = filepath.Clean(abs)
+
 	if abs == "/" {
 		return fmt.Errorf("refusing to remove %s", abs)
 	}
