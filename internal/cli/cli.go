@@ -231,6 +231,13 @@ func retryOpts(c *config.Config) retry.Options {
 	return retry.Options{Attempts: c.Retries, Delay: c.Delay, All: c.RetryAll}
 }
 
+type fetcher struct {
+	client *httpget.Client
+	url    string
+	f      *os.File
+	total  int64
+}
+
 func fetchInto(e *env, url string, f *os.File) error {
 	client := newClient(e.cfg)
 	var total int64
