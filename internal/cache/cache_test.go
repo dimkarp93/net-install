@@ -16,7 +16,7 @@ func TestFilePath(t *testing.T) {
 		"https://just.systems/install.sh":                                 "/c/files/just.systems/install.sh",
 		"https://example.com/":                                            "/c/files/example.com/index",
 		"https://example.com:8443/a/../../etc/passwd":                     "/c/files/example.com_8443/etc/passwd",
-		"file:///x/y":                                                     "/c/files/local/x/y",
+		"file:///x/y": "/c/files/local/x/y",
 	}
 	for url, want := range cases {
 		t.Run(url, func(t *testing.T) {
