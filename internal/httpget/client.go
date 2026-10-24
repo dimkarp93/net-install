@@ -28,8 +28,17 @@ type Client struct {
 }
 
 func New(o Options) *Client {
+	return &Client{
+		hc:         &http.Client{Transport: newTransport(o), CheckRedirect: checkRedirect},
+		speedLimit: o.SpeedLimit,
+		speedTime:  o.SpeedTime,
+		tick:       time.Second,
+	}
+}
+
+func newTransport(o Options) *http.Transport {
 	dialer := &net.Dialer{Timeout: o.ConnectTimeout, KeepAlive: 30 * time.Second}
-	tr := &http.Transport{
+	return &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           dialer.DialContext,
 		TLSHandshakeTimeout:   o.ConnectTimeout,
@@ -38,20 +47,13 @@ func New(o Options) *Client {
 		IdleConnTimeout:       90 * time.Second,
 		ExpectContinueTimeout: time.Second,
 	}
-	return &Client{
-		hc: &http.Client{
-			Transport: tr,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if len(via) >= maxRedirects {
-					return errTooManyRedirects
-				}
-				return nil
-			},
-		},
-		speedLimit: o.SpeedLimit,
-		speedTime:  o.SpeedTime,
-		tick:       time.Second,
+}
+
+func checkRedirect(_ *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return errTooManyRedirects
 	}
+	return nil
 }
 
 func (c *Client) Download(ctx context.Context, url string, dst io.Writer) (int64, error) {
@@ -70,26 +72,12 @@ func (c *Client) Download(ctx context.Context, url string, dst io.Writer) (int64
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
-		return 0, &Error{
-			Kind:   KindHTTP,
-			Status: resp.StatusCode,
-			msg:    fmt.Sprintf("the server answered %s", resp.Status),
-		}
+		return 0, statusError(resp)
 	}
 
-	sr := newStallReader(resp.Body, c.speedLimit, c.speedTime, c.tick, cancel)
-	defer sr.stop()
-
-	n, err := io.Copy(dst, sr)
+	n, err := c.copyBody(dst, resp.Body, cancel)
 	if err != nil {
-		if sr.stalled() {
-			return n, &Error{
-				Kind: KindTimeout,
-				msg:  fmt.Sprintf("the transfer stayed below %d bytes/s for %ds", c.speedLimit, c.speedTime),
-			}
-		}
-		return n, classify(err)
+		return n, err
 	}
 
 	if resp.ContentLength >= 0 && n != resp.ContentLength {
@@ -98,6 +86,33 @@ func (c *Client) Download(ctx context.Context, url string, dst io.Writer) (int64
 			msg:  fmt.Sprintf("got %d bytes, expected %d", n, resp.ContentLength),
 		}
 	}
-
 	return n, nil
+}
+
+func statusError(resp *http.Response) *Error {
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+
+	return &Error{
+		Kind:   KindHTTP,
+		Status: resp.StatusCode,
+		msg:    fmt.Sprintf("the server answered %s", resp.Status),
+	}
+}
+
+func (c *Client) copyBody(dst io.Writer, body io.Reader, cancel func()) (int64, error) {
+	sr := newStallReader(body, c.speedLimit, c.speedTime, c.tick, cancel)
+	defer sr.stop()
+
+	n, err := io.Copy(dst, sr)
+	switch {
+	case err == nil:
+		return n, nil
+	case sr.stalled():
+		return n, &Error{
+			Kind: KindTimeout,
+			msg:  fmt.Sprintf("the transfer stayed below %d bytes/s for %ds", c.speedLimit, c.speedTime),
+		}
+	default:
+		return n, classify(err)
+	}
 }

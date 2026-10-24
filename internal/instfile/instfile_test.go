@@ -4,6 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type fakeRunner struct {
@@ -16,127 +19,100 @@ func (f *fakeRunner) Run(name string, args ...string) int {
 	return f.rc
 }
 
-func TestWritableTargetGoesThroughGo(t *testing.T) {
-	dest := filepath.Join(t.TempDir(), "sub", "file")
+func committed(t *testing.T, dest string, mode os.FileMode, run *fakeRunner) error {
+	t.Helper()
 
-	target, err := Open(dest, 0o755)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer target.Close()
+	target, err := Open(dest, mode)
+	require.NoError(t, err)
+	t.Cleanup(target.Close)
 
-	if _, err := target.File().WriteString("payload"); err != nil {
-		t.Fatal(err)
-	}
+	_, err = target.File().WriteString("payload")
+	require.NoError(t, err)
+
+	return target.Commit(run)
+}
+
+func committedOK(t *testing.T, dest string, mode os.FileMode) *fakeRunner {
+	t.Helper()
 
 	run := &fakeRunner{}
-	if err := target.Commit(run); err != nil {
-		t.Fatal(err)
-	}
-	if len(run.calls) != 0 {
-		t.Fatalf("escalated to sudo for a writable directory: %v", run.calls)
+	require.NoError(t, committed(t, dest, mode, run))
+
+	return run
+}
+
+func lockedDir(t *testing.T) string {
+	t.Helper()
+
+	if os.Geteuid() == 0 {
+		t.Skip("root can write anywhere")
 	}
 
-	body, err := os.ReadFile(dest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(body) != "payload" {
-		t.Fatalf("got %q", body)
-	}
+	locked := filepath.Join(t.TempDir(), "locked")
+	require.NoError(t, os.Mkdir(locked, 0o555))
 
-	st, err := os.Stat(dest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st.Mode().Perm() != 0o755 {
-		t.Fatalf("mode=%o, want 755", st.Mode().Perm())
-	}
+	return locked
+}
+
+func TestWritableTargetGoesThroughGo(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "sub", "file")
+	run := committedOK(t, dest, 0o755)
+
+	t.Run("no sudo", func(t *testing.T) {
+		assert.Empty(t, run.calls)
+	})
+	t.Run("content", func(t *testing.T) {
+		body, err := os.ReadFile(dest)
+		require.NoError(t, err)
+		assert.Equal(t, "payload", string(body))
+	})
+	t.Run("mode", func(t *testing.T) {
+		st, err := os.Stat(dest)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0o755), st.Mode().Perm())
+	})
 }
 
 func TestTempFileIsRemovedWhenNotCommitted(t *testing.T) {
 	dir := t.TempDir()
 	target, err := Open(filepath.Join(dir, "file"), 0o644)
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := target.File().Name()
+	require.NoError(t, err)
+
 	target.Close()
 
-	if _, err := os.Stat(name); !os.IsNotExist(err) {
-		t.Fatalf("the temporary file survived: %v", err)
-	}
 	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 0 {
-		t.Fatalf("left %d entries behind", len(entries))
-	}
+	require.NoError(t, err)
+	assert.Empty(t, entries)
 }
 
 func TestUnwritableTargetEscalates(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root can write anywhere")
-	}
+	dest := filepath.Join(lockedDir(t), "file")
+	got := singleCall(t, committedOK(t, dest, 0o600))
 
-	dir := t.TempDir()
-	locked := filepath.Join(dir, "locked")
-	if err := os.Mkdir(locked, 0o555); err != nil {
-		t.Fatal(err)
-	}
-	dest := filepath.Join(locked, "file")
+	t.Run("sudo install", func(t *testing.T) {
+		assert.Equal(t, []string{"sudo", "install", "-D", "-m", "0600"}, got[:5])
+	})
+	t.Run("destination", func(t *testing.T) {
+		assert.Equal(t, dest, got[len(got)-1])
+	})
+}
 
-	target, err := Open(dest, 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer target.Close()
+func singleCall(t *testing.T, run *fakeRunner) []string {
+	t.Helper()
 
-	if _, err := target.File().WriteString("x"); err != nil {
-		t.Fatal(err)
-	}
+	require.Len(t, run.calls, 1)
 
-	run := &fakeRunner{}
-	if err := target.Commit(run); err != nil {
-		t.Fatal(err)
-	}
-	if len(run.calls) != 1 {
-		t.Fatalf("calls=%v", run.calls)
-	}
-	got := run.calls[0]
-	if got[0] != "sudo" || got[1] != "install" || got[2] != "-D" || got[3] != "-m" || got[4] != "0600" {
-		t.Fatalf("unexpected command: %v", got)
-	}
-	if got[len(got)-1] != dest {
-		t.Fatalf("destination=%q, want %q", got[len(got)-1], dest)
-	}
+	return run.calls[0]
 }
 
 func TestSudoFailurePropagates(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root can write anywhere")
-	}
+	err := committed(t, filepath.Join(lockedDir(t), "file"), 0o644, &fakeRunner{rc: 1})
 
-	dir := t.TempDir()
-	locked := filepath.Join(dir, "locked")
-	if err := os.Mkdir(locked, 0o555); err != nil {
-		t.Fatal(err)
-	}
-
-	target, err := Open(filepath.Join(locked, "file"), 0o644)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer target.Close()
-
-	if err := target.Commit(&fakeRunner{rc: 1}); err == nil {
-		t.Fatal("expected an error")
-	}
+	assert.Error(t, err)
 }
 
 func TestDirectoryDestinationIsRejected(t *testing.T) {
-	if _, err := Open(t.TempDir(), 0o644); err == nil {
-		t.Fatal("expected an error for a directory destination")
-	}
+	_, err := Open(t.TempDir(), 0o644)
+
+	assert.Error(t, err)
 }

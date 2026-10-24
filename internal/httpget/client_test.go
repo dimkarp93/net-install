@@ -5,81 +5,160 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+var gzipABC = []byte{
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+	0x4b, 0x4c, 0x4a, 0x06, 0x00, 0xc2, 0x41, 0x24, 0x35, 0x03, 0x00, 0x00, 0x00,
+}
 
 func testClient(t *testing.T) *Client {
 	t.Helper()
+
 	t.Setenv("NO_PROXY", "*")
 	t.Setenv("no_proxy", "*")
+
 	return New(Options{ConnectTimeout: 5 * time.Second, SpeedLimit: 0, SpeedTime: 0})
 }
 
 func code(t *testing.T, err error) int {
 	t.Helper()
+
 	var e *Error
-	if !errors.As(err, &e) {
-		t.Fatalf("not a httpget error: %v", err)
-	}
+	require.ErrorAs(t, err, &e)
+
 	return e.ExitCode()
+}
+
+func serve(t *testing.T, h http.HandlerFunc) string {
+	t.Helper()
+
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	return srv.URL
+}
+
+func bodyHandler(body []byte) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) { w.Write(body) }
+}
+
+type gzipRequest struct {
+	asked bool
+}
+
+func (g *gzipRequest) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	g.asked = r.Header.Get("Accept-Encoding") != ""
+	w.Header().Set("Content-Encoding", "gzip")
+	w.Write(gzipABC)
+}
+
+type redirector struct {
+	url   string
+	hops  int
+	limit int
+}
+
+func (rd *redirector) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	rd.hops++
+	if rd.limit > 0 && rd.hops > rd.limit {
+		w.Write([]byte("done"))
+		return
+	}
+	http.Redirect(w, r, rd.url, http.StatusFound)
+}
+
+func redirectServer(t *testing.T, limit int) string {
+	t.Helper()
+
+	rd := &redirector{limit: limit}
+	rd.url = serve(t, rd.serveHTTP)
+
+	return rd.url
+}
+
+func truncatedHandler(w http.ResponseWriter, _ *http.Request) {
+	conn, bufrw, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	fmt.Fprint(bufrw, "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort")
+	bufrw.Flush()
+}
+
+func trickleHandler(w http.ResponseWriter, r *http.Request) {
+	for range 200 {
+		if r.Context().Err() != nil {
+			return
+		}
+		w.Write([]byte("x"))
+		w.(http.Flusher).Flush()
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func download(t *testing.T, c *Client, url string) (int64, string, error) {
+	t.Helper()
+
+	var buf bytes.Buffer
+	n, err := c.Download(context.Background(), url, &buf)
+
+	return n, buf.String(), err
+}
+
+func downloadOK(t *testing.T, c *Client, url string) string {
+	t.Helper()
+
+	_, got, err := download(t, c, url)
+	require.NoError(t, err)
+
+	return got
 }
 
 func TestDownloadWritesTheBody(t *testing.T) {
 	body := bytes.Repeat([]byte("abc"), 1000)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(body)
-	}))
-	defer srv.Close()
 
-	var buf bytes.Buffer
-	n, err := testClient(t).Download(context.Background(), srv.URL, &buf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != int64(len(body)) || !bytes.Equal(buf.Bytes(), body) {
-		t.Fatalf("got %d bytes, want %d", n, len(body))
-	}
+	n, got, err := download(t, testClient(t), serve(t, bodyHandler(body)))
+
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(body)), n)
+	assert.Equal(t, string(body), got)
 }
 
 func TestGzipEncodedBodyArrivesDecoded(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Accept-Encoding") == "" {
-			t.Error("the transport did not ask for gzip")
-		}
-		w.Header().Set("Content-Encoding", "gzip")
-		w.Write([]byte{
-			0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
-			0x4b, 0x4c, 0x4a, 0x06, 0x00, 0xc2, 0x41, 0x24, 0x35, 0x03, 0x00, 0x00, 0x00,
-		})
-	}))
-	defer srv.Close()
+	g := &gzipRequest{}
+	got := downloadOK(t, testClient(t), serve(t, g.serveHTTP))
 
-	var buf bytes.Buffer
-	if _, err := testClient(t).Download(context.Background(), srv.URL, &buf); err != nil {
-		t.Fatal(err)
-	}
-	if buf.String() != "abc" {
-		t.Fatalf("got %q, want %q", buf.String(), "abc")
-	}
+	t.Run("asks for gzip", func(t *testing.T) {
+		assert.True(t, g.asked)
+	})
+	t.Run("decodes body", func(t *testing.T) {
+		assert.Equal(t, "abc", got)
+	})
 }
 
 func TestStatusAboveFourHundredFailsAndWritesNothing(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "nope", http.StatusNotFound)
-	}))
-	defer srv.Close()
+	notFound := func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "nope", http.StatusNotFound) }
 
-	var buf bytes.Buffer
-	_, err := testClient(t).Download(context.Background(), srv.URL, &buf)
-	if got := code(t, err); got != 22 {
-		t.Fatalf("rc=%d, want 22", got)
-	}
-	if buf.Len() != 0 {
-		t.Fatalf("wrote %d bytes on a 404", buf.Len())
-	}
+	_, got, err := download(t, testClient(t), serve(t, notFound))
+
+	t.Run("exit code", func(t *testing.T) {
+		assert.Equal(t, 22, code(t, err))
+	})
+	t.Run("writes nothing", func(t *testing.T) {
+		assert.Empty(t, got)
+	})
 }
 
 func TestRetryableStatuses(t *testing.T) {
@@ -88,133 +167,99 @@ func TestRetryableStatuses(t *testing.T) {
 		408: true, 429: true, 500: true, 503: true,
 	}
 	for status, want := range cases {
-		e := &Error{Kind: KindHTTP, Status: status}
-		if e.Retryable() != want {
-			t.Fatalf("status %d: retryable=%v, want %v", status, e.Retryable(), want)
-		}
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			assert.Equal(t, want, (&Error{Kind: KindHTTP, Status: status}).Retryable())
+		})
+	}
+}
+
+func TestExitCodes(t *testing.T) {
+	cases := map[Kind]int{
+		KindLocal: 1, KindDNS: 6, KindConnect: 7, KindTruncated: 18,
+		KindHTTP: 22, KindTimeout: 28, KindTLS: 35, KindRedirect: 47,
+	}
+	for kind, want := range cases {
+		t.Run(fmt.Sprint(kind), func(t *testing.T) {
+			assert.Equal(t, want, (&Error{Kind: kind}).ExitCode())
+		})
 	}
 }
 
 func TestRedirectsAreFollowedAndBounded(t *testing.T) {
-	var srv *httptest.Server
-	hops := 0
-	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hops++
-		if hops > 3 {
-			w.Write([]byte("done"))
-			return
-		}
-		http.Redirect(w, r, srv.URL, http.StatusFound)
-	}))
-	defer srv.Close()
+	_, got, err := download(t, testClient(t), redirectServer(t, 3))
 
-	var buf bytes.Buffer
-	if _, err := testClient(t).Download(context.Background(), srv.URL, &buf); err != nil {
-		t.Fatal(err)
-	}
-	if buf.String() != "done" {
-		t.Fatalf("got %q", buf.String())
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "done", got)
 }
 
 func TestTooManyRedirects(t *testing.T) {
-	var srv *httptest.Server
-	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, srv.URL, http.StatusFound)
-	}))
-	defer srv.Close()
+	_, _, err := download(t, testClient(t), redirectServer(t, 0))
 
-	_, err := testClient(t).Download(context.Background(), srv.URL, &bytes.Buffer{})
-	if got := code(t, err); got != 47 {
-		t.Fatalf("rc=%d, want 47", got)
-	}
+	assert.Equal(t, 47, code(t, err))
 }
 
 func TestTruncatedBody(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hj, ok := w.(http.Hijacker)
-		if !ok {
-			t.Skip("no hijacker")
-		}
-		conn, bufrw, err := hj.Hijack()
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		defer conn.Close()
-		fmt.Fprint(bufrw, "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort")
-		bufrw.Flush()
-	}))
-	defer srv.Close()
+	_, _, err := download(t, testClient(t), serve(t, truncatedHandler))
 
-	_, err := testClient(t).Download(context.Background(), srv.URL, &bytes.Buffer{})
-	if got := code(t, err); got != 18 {
-		t.Fatalf("rc=%d, want 18: %v", got, err)
-	}
+	assert.Equal(t, 18, code(t, err))
 }
 
 func TestConnectionRefused(t *testing.T) {
-	_, err := testClient(t).Download(context.Background(), "http://127.0.0.1:1/x", &bytes.Buffer{})
-	if got := code(t, err); got != 7 {
-		t.Fatalf("rc=%d, want 7: %v", got, err)
+	_, _, err := download(t, testClient(t), "http://127.0.0.1:1/x")
+
+	assert.Equal(t, 7, code(t, err))
+}
+
+func TestClassifyKinds(t *testing.T) {
+	cases := map[string]struct {
+		err  error
+		want Kind
+	}{
+		"dns":       {err: &net.DNSError{Err: "no such host", Name: "x"}, want: KindDNS},
+		"eof":       {err: io.ErrUnexpectedEOF, want: KindTruncated},
+		"other":     {err: errors.New("x"), want: KindConnect},
+		"redirects": {err: fmt.Errorf("get: %w", errTooManyRedirects), want: KindRedirect},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, classify(tc.err).Kind)
+		})
 	}
 }
 
-func TestStalledTransferIsAborted(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		f, ok := w.(http.Flusher)
-		if !ok {
-			return
-		}
-		for i := 0; i < 200; i++ {
-			select {
-			case <-r.Context().Done():
-				return
-			default:
-			}
-			w.Write([]byte("x"))
-			f.Flush()
-			time.Sleep(50 * time.Millisecond)
-		}
-	}))
-	defer srv.Close()
+func speedClient(t *testing.T, limit int) *Client {
+	t.Helper()
 
 	t.Setenv("NO_PROXY", "*")
-	c := New(Options{ConnectTimeout: 5 * time.Second, SpeedLimit: 1000, SpeedTime: 1})
+	c := New(Options{ConnectTimeout: 5 * time.Second, SpeedLimit: limit, SpeedTime: 1})
 	c.tick = 50 * time.Millisecond
+
+	return c
+}
+
+func TestStalledTransferIsAborted(t *testing.T) {
+	c := speedClient(t, 1000)
+	url := serve(t, trickleHandler)
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := c.Download(context.Background(), srv.URL, &bytes.Buffer{})
+		_, err := c.Download(context.Background(), url, &bytes.Buffer{})
 		done <- err
 	}()
 
 	select {
 	case err := <-done:
-		if got := code(t, err); got != 28 {
-			t.Fatalf("rc=%d, want 28: %v", got, err)
-		}
+		assert.Equal(t, 28, code(t, err))
 	case <-time.After(10 * time.Second):
-		t.Fatal("the stalled transfer was not aborted")
+		assert.Fail(t, "the stalled transfer was not aborted")
 	}
 }
 
 func TestFastTransferIsNotAborted(t *testing.T) {
 	body := bytes.Repeat([]byte("y"), 512<<10)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(body)
-	}))
-	defer srv.Close()
 
-	t.Setenv("NO_PROXY", "*")
-	c := New(Options{ConnectTimeout: 5 * time.Second, SpeedLimit: 1024, SpeedTime: 1})
-	c.tick = 50 * time.Millisecond
+	_, got, err := download(t, speedClient(t, 1024), serve(t, bodyHandler(body)))
 
-	var buf bytes.Buffer
-	if _, err := c.Download(context.Background(), srv.URL, &buf); err != nil {
-		t.Fatal(err)
-	}
-	if buf.Len() != len(body) {
-		t.Fatalf("got %d bytes, want %d", buf.Len(), len(body))
-	}
+	require.NoError(t, err)
+	assert.Len(t, got, len(body))
 }

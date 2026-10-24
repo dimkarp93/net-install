@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +19,7 @@ import (
 	"github.com/dimkarp93/net-install/internal/netlog"
 	"github.com/dimkarp93/net-install/internal/retry"
 	"github.com/dimkarp93/net-install/internal/runner"
+	"github.com/dimkarp93/utils/pkg/collections"
 )
 
 type env struct {
@@ -60,20 +63,11 @@ var cacheSpec = spec{
 var aptArchives = "/var/cache/apt/archives"
 
 func specFor(command string) (spec, bool) {
-	s := spec{value: map[string]bool{}, flag: map[string]bool{}}
-	for k, v := range netSpec.value {
-		s.value[k] = v
-	}
-	for k, v := range netSpec.flag {
-		s.flag[k] = v
-	}
-	for k, v := range cacheSpec.value {
-		s.value[k] = v
-	}
-	for k, v := range cacheSpec.flag {
-		s.flag[k] = v
+	if command == "log" {
+		return spec{value: map[string]bool{}, flag: map[string]bool{}}, true
 	}
 
+	s := baseSpec()
 	switch command {
 	case "fetch":
 	case "apt":
@@ -85,12 +79,17 @@ func specFor(command string) (spec, bool) {
 	case "clone":
 		s.value[config.Depth] = true
 		s.flag[config.Force] = true
-	case "log":
-		return spec{value: map[string]bool{}, flag: map[string]bool{}}, true
 	default:
 		return s, false
 	}
 	return s, true
+}
+
+func baseSpec() spec {
+	s := spec{value: maps.Clone(netSpec.value), flag: maps.Clone(netSpec.flag)}
+	maps.Copy(s.value, cacheSpec.value)
+	maps.Copy(s.flag, cacheSpec.flag)
+	return s
 }
 
 func Run(args []string) int {
@@ -111,23 +110,31 @@ func Run(args []string) int {
 		return code
 	}
 
-	if args[0] == "-h" || args[0] == "--help" || args[0] == "-help" || args[0] == "help" {
+	switch args[0] {
+	case "-h", "--help", "-help", "help":
 		printUsage(e.out)
 		return 0
+	case "--envs":
+		return runEnvs(e, args[1:])
+	default:
+		return runCommand(e, args[0], args[1:])
+	}
+}
+
+func runEnvs(e *env, args []string) int {
+	if len(args) != 0 {
+		return usageError(e, fmt.Errorf("--envs takes no arguments"))
 	}
 
-	if args[0] == "--envs" {
-		if len(args) != 1 {
-			return usageError(e, fmt.Errorf("--envs takes no arguments"))
-		}
-		if err := e.cfg.LoadEnv(os.LookupEnv); err != nil {
-			return usageError(e, err)
-		}
-		e.cfg.Fprint(e.out)
-		return 0
+	if err := e.cfg.LoadEnv(os.LookupEnv); err != nil {
+		return usageError(e, err)
 	}
 
-	command := args[0]
+	e.cfg.Fprint(e.out)
+	return 0
+}
+
+func runCommand(e *env, command string, args []string) int {
 	s, ok := specFor(command)
 	if !ok {
 		fmt.Fprintf(e.err, "net-install: unknown command %q\n", command)
@@ -135,49 +142,73 @@ func Run(args []string) int {
 		return 2
 	}
 
-	if err := e.cfg.LoadEnv(os.LookupEnv); err != nil {
-		return usageError(e, err)
-	}
-
-	p, err := parse(args[1:], s)
+	rest, err := configure(e, args, s)
 	if err != nil {
 		return usageError(e, err)
 	}
+
+	if command != "log" {
+		if code, ok := openCache(e); !ok {
+			return code
+		}
+	}
+
+	return dispatch(e, command, rest)
+}
+
+func configure(e *env, args []string, s spec) ([]string, error) {
+	if err := e.cfg.LoadEnv(os.LookupEnv); err != nil {
+		return nil, err
+	}
+
+	p, err := parse(args, s)
+	if err != nil {
+		return nil, err
+	}
+
 	for _, f := range p.flags {
 		if err := e.cfg.Set(f.name, f.value, config.SourceFlag); err != nil {
-			return usageError(e, err)
+			return nil, err
 		}
 	}
+	return p.args, nil
+}
 
-	switch command {
-	case "fetch", "download", "script", "clone", "apt":
-		if !e.cfg.NoCache {
-			if e.cfg.CacheRO && e.cfg.ForceUpdate {
-				return usageError(e, fmt.Errorf("--force-update cannot refresh a --cache-ro cache"))
-			}
-			c, err := cache.Open(e.cfg.CacheDir, e.cfg.CacheRO)
-			if err != nil {
-				return fail(e, &localError{err})
-			}
-			e.cache = c
-		}
+func openCache(e *env) (int, bool) {
+	if e.cfg.NoCache {
+		return 0, true
 	}
 
+	if e.cfg.CacheRO && e.cfg.ForceUpdate {
+		return usageError(e, fmt.Errorf("--force-update cannot refresh a --cache-ro cache")), false
+	}
+
+	c, err := cache.Open(e.cfg.CacheDir, e.cfg.CacheRO)
+	if err != nil {
+		return fail(e, &localError{err}), false
+	}
+
+	e.cache = c
+	return 0, true
+}
+
+func dispatch(e *env, command string, args []string) int {
 	switch command {
 	case "fetch":
-		return cmdFetch(e, p.args)
+		return cmdFetch(e, args)
 	case "download":
-		return cmdDownload(e, p.args)
+		return cmdDownload(e, args)
 	case "script":
-		return cmdScript(e, p.args)
+		return cmdScript(e, args)
 	case "clone":
-		return cmdClone(e, p.args)
+		return cmdClone(e, args)
 	case "apt":
-		return cmdApt(e, p.args)
+		return cmdApt(e, args)
 	case "log":
-		return cmdLog(e, p.args)
+		return cmdLog(e, args)
+	default:
+		return 2
 	}
-	return 2
 }
 
 func usageError(e *env, err error) int {
@@ -202,47 +233,68 @@ func retryOpts(c *config.Config) retry.Options {
 	return retry.Options{Attempts: c.Retries, Delay: c.Delay, All: c.RetryAll}
 }
 
-func fetchInto(e *env, url string, f *os.File) error {
-	client := newClient(e.cfg)
-	var total int64
+type fetcher struct {
+	client *httpget.Client
+	url    string
+	f      *os.File
+	total  int64
+}
 
-	err := retry.Do(e.log, retryOpts(e.cfg), "fetch "+url, func() error {
-		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			return &localError{err}
-		}
-		if err := f.Truncate(0); err != nil {
-			return &localError{err}
-		}
-		n, err := client.Download(context.Background(), url, f)
-		total = n
-		return err
-	})
-	if err != nil {
+func fetchInto(e *env, url string, f *os.File) error {
+	ft := &fetcher{client: newClient(e.cfg), url: url, f: f}
+	if err := retry.Do(e.log, retryOpts(e.cfg), "fetch "+url, ft.attempt); err != nil {
 		return err
 	}
 
-	e.log.Logf("event=size what=fetch url=%s bytes=%d", url, total)
+	e.log.Logf("event=size what=fetch url=%s bytes=%d", url, ft.total)
 	return nil
+}
+
+func (ft *fetcher) attempt() error {
+	if _, err := ft.f.Seek(0, io.SeekStart); err != nil {
+		return &localError{err}
+	}
+	if err := ft.f.Truncate(0); err != nil {
+		return &localError{err}
+	}
+
+	n, err := ft.client.Download(context.Background(), ft.url, ft.f)
+	ft.total = n
+	return err
 }
 
 func obtain(e *env, url string) (string, func(), error) {
 	if e.cache != nil {
-		file, err := e.cache.FilePath(url)
-		if err != nil {
-			return "", nil, &localError{err}
-		}
-		have := cache.Valid(file)
-		if have && (!e.cfg.ForceUpdate || fresh(e, file)) {
-			e.log.Logf("event=cache-hit what=%s path=%s", url, file)
-			return file, func() {}, nil
-		}
-		if !e.cache.ReadOnly() {
-			file, err := storeFile(e, url, file, have)
+		if file, ok, err := fromCache(e, url); ok || err != nil {
 			return file, func() {}, err
 		}
-		e.log.Logf("event=cache-miss what=%s path=%s", url, file)
 	}
 
+	return fetchTemp(e, url)
+}
+
+func fromCache(e *env, url string) (string, bool, error) {
+	file, err := e.cache.FilePath(url)
+	if err != nil {
+		return "", false, &localError{err}
+	}
+
+	have := cache.Valid(file)
+	if have && (!e.cfg.ForceUpdate || fresh(e, file)) {
+		e.log.Logf("event=cache-hit what=%s path=%s", url, file)
+		return file, true, nil
+	}
+
+	if !e.cache.ReadOnly() {
+		file, err := storeFile(e, url, file, have)
+		return file, true, err
+	}
+
+	e.log.Logf("event=cache-miss what=%s path=%s", url, file)
+	return "", false, nil
+}
+
+func fetchTemp(e *env, url string) (string, func(), error) {
 	f, err := os.CreateTemp("", "net-install-*")
 	if err != nil {
 		return "", nil, &localError{err}
@@ -255,6 +307,7 @@ func obtain(e *env, url string) (string, func(), error) {
 		cleanup()
 		return "", nil, err
 	}
+
 	if err := f.Close(); err != nil {
 		cleanup()
 		return "", nil, &localError{err}
@@ -267,6 +320,7 @@ func storeFile(e *env, url, file string, have bool) (string, error) {
 	if err != nil {
 		return "", &localError{err}
 	}
+
 	if err := fetchInto(e, url, tmp); err != nil {
 		tmp.Close()
 		os.Remove(tmp.Name())
@@ -276,6 +330,7 @@ func storeFile(e *env, url, file string, have bool) (string, error) {
 		}
 		return "", err
 	}
+
 	if err := cache.Store(tmp, file); err != nil {
 		os.Remove(tmp.Name())
 		return "", &localError{err}
@@ -306,23 +361,24 @@ func cmdFetch(e *env, args []string) int {
 	}
 	defer cleanup()
 
+	if err := writeDest(e, src, dest); err != nil {
+		return fail(e, &localError{err})
+	}
+	return 0
+}
+
+func writeDest(e *env, src, dest string) error {
 	if dest == "-" {
-		if err := copyFrom(src, e.out); err != nil {
-			return fail(e, &localError{err})
-		}
-		return 0
+		return copyFrom(src, e.out)
 	}
 
 	f, err := os.Create(dest)
 	if err != nil {
-		return fail(e, &localError{err})
+		return err
 	}
 	defer f.Close()
 
-	if err := copyFrom(src, f); err != nil {
-		return fail(e, &localError{err})
-	}
-	return 0
+	return copyFrom(src, f)
 }
 
 func cmdDownload(e *env, args []string) int {
@@ -342,25 +398,40 @@ func cmdDownload(e *env, args []string) int {
 	}
 	defer target.Close()
 
+	if err := downloadInto(e, url, target); err != nil {
+		return fail(e, err)
+	}
+
+	if err := install(e, target, dest); err != nil {
+		return fail(e, &localError{err})
+	}
+	return 0
+}
+
+func downloadInto(e *env, url string, target *instfile.Target) error {
 	src, cleanup, err := obtain(e, url)
 	if err != nil {
-		return fail(e, err)
+		return err
 	}
 	defer cleanup()
 
 	if err := copyFrom(src, target.File()); err != nil {
-		return fail(e, &localError{err})
+		return &localError{err}
+	}
+	return nil
+}
+
+func install(e *env, target *instfile.Target, dest string) error {
+	err := target.Commit(e.run)
+	e.log.Logf("event=install what=%s mode=%s rc=%d", dest, e.cfg.Mode, commitRC(err))
+	return err
+}
+
+func commitRC(err error) int {
+	if err != nil {
+		return 1
 	}
 
-	rc := 0
-	cerr := target.Commit(e.run)
-	if cerr != nil {
-		rc = 1
-	}
-	e.log.Logf("event=install what=%s mode=%s rc=%d", dest, e.cfg.Mode, rc)
-	if cerr != nil {
-		return fail(e, &localError{cerr})
-	}
 	return 0
 }
 
@@ -404,47 +475,60 @@ func cmdClone(e *env, args []string) int {
 		return usageError(e, err)
 	}
 
-	if e.cache == nil {
-		if err := cloneInto(e, url, dest, true); err != nil {
-			return fail(e, err)
-		}
-		return 0
-	}
-
-	mirror, err := mirrorFor(e, url)
-	if err != nil {
+	if err := clone(e, url, dest); err != nil {
 		return fail(e, err)
-	}
-	if mirror == "" {
-		if err := cloneInto(e, url, dest, true); err != nil {
-			return fail(e, err)
-		}
-		return 0
-	}
-	if err := cloneInto(e, mirror, dest, false); err != nil {
-		return fail(e, err)
-	}
-	if rc := e.run.Run("git", "-C", dest, "remote", "set-url", "origin", url); rc != 0 {
-		return fail(e, &gitError{rc})
 	}
 	return 0
 }
 
+func clone(e *env, url, dest string) error {
+	if e.cache == nil {
+		return cloneInto(e, url, dest, true)
+	}
+
+	mirror, err := mirrorFor(e, url)
+	if err != nil {
+		return err
+	}
+	if mirror == "" {
+		return cloneInto(e, url, dest, true)
+	}
+
+	if err := cloneInto(e, mirror, dest, false); err != nil {
+		return err
+	}
+	if rc := e.run.Run("git", "-C", dest, "remote", "set-url", "origin", url); rc != 0 {
+		return &gitError{rc}
+	}
+	return nil
+}
+
+type cloneJob struct {
+	e       *env
+	src     string
+	dest    string
+	shallow bool
+}
+
 func cloneInto(e *env, src, dest string, shallow bool) error {
-	return retry.Do(e.log, retryOpts(e.cfg), "clone "+src, func() error {
-		if err := os.RemoveAll(dest); err != nil {
-			return &localError{err}
-		}
-		args := []string{"clone"}
-		if shallow {
-			args = append(args, "--depth", strconv.Itoa(e.cfg.Depth))
-		}
-		rc := e.run.Run("git", gitNet(e, append(args, src, dest)...)...)
-		if rc != 0 {
-			return &gitError{rc}
-		}
-		return nil
-	})
+	job := cloneJob{e: e, src: src, dest: dest, shallow: shallow}
+	return retry.Do(e.log, retryOpts(e.cfg), "clone "+src, job.attempt)
+}
+
+func (j cloneJob) attempt() error {
+	if err := os.RemoveAll(j.dest); err != nil {
+		return &localError{err}
+	}
+
+	args := []string{"clone"}
+	if j.shallow {
+		args = append(args, "--depth", strconv.Itoa(j.e.cfg.Depth))
+	}
+
+	if rc := j.e.run.Run("git", gitNet(j.e, append(args, j.src, j.dest)...)...); rc != 0 {
+		return &gitError{rc}
+	}
+	return nil
 }
 
 func mirrorFor(e *env, url string) (string, error) {
@@ -454,17 +538,7 @@ func mirrorFor(e *env, url string) (string, error) {
 	}
 
 	if st, err := os.Stat(filepath.Join(mirror, ".git")); err == nil && st.IsDir() {
-		if !e.cfg.ForceUpdate || fresh(e, mirror) {
-			e.log.Logf("event=cache-hit what=%s path=%s", url, mirror)
-			return mirror, nil
-		}
-		if err := updateMirror(e, url, mirror); err != nil {
-			e.log.Logf("event=cache-stale what=%s path=%s", url, mirror)
-			return mirror, nil
-		}
-		touch(mirror)
-		e.log.Logf("event=cache-store what=%s path=%s", url, mirror)
-		return mirror, nil
+		return refreshMirror(e, url, mirror), nil
 	}
 
 	if e.cache.ReadOnly() {
@@ -472,27 +546,51 @@ func mirrorFor(e *env, url string) (string, error) {
 		return "", nil
 	}
 
-	if err := os.MkdirAll(filepath.Dir(mirror), 0o755); err != nil {
-		return "", &localError{err}
-	}
-	tmp, err := os.MkdirTemp(filepath.Dir(mirror), ".net-install-*")
-	if err != nil {
-		return "", &localError{err}
-	}
-	defer os.RemoveAll(tmp)
-
-	if err := cloneInto(e, url, tmp, true); err != nil {
+	if err := createMirror(e, url, mirror); err != nil {
 		return "", err
-	}
-	if err := os.RemoveAll(mirror); err != nil {
-		return "", &localError{err}
-	}
-	if err := os.Rename(tmp, mirror); err != nil {
-		return "", &localError{err}
 	}
 	touch(mirror)
 	e.log.Logf("event=cache-store what=%s path=%s", url, mirror)
 	return mirror, nil
+}
+
+func refreshMirror(e *env, url, mirror string) string {
+	if !e.cfg.ForceUpdate || fresh(e, mirror) {
+		e.log.Logf("event=cache-hit what=%s path=%s", url, mirror)
+		return mirror
+	}
+
+	if err := updateMirror(e, url, mirror); err != nil {
+		e.log.Logf("event=cache-stale what=%s path=%s", url, mirror)
+		return mirror
+	}
+
+	touch(mirror)
+	e.log.Logf("event=cache-store what=%s path=%s", url, mirror)
+	return mirror
+}
+
+func createMirror(e *env, url, mirror string) error {
+	if err := os.MkdirAll(filepath.Dir(mirror), 0o755); err != nil {
+		return &localError{err}
+	}
+	tmp, err := os.MkdirTemp(filepath.Dir(mirror), ".net-install-*")
+	if err != nil {
+		return &localError{err}
+	}
+	defer os.RemoveAll(tmp)
+
+	if err := cloneInto(e, url, tmp, true); err != nil {
+		return err
+	}
+
+	if err := os.RemoveAll(mirror); err != nil {
+		return &localError{err}
+	}
+	if err := os.Rename(tmp, mirror); err != nil {
+		return &localError{err}
+	}
+	return nil
 }
 
 func updateMirror(e *env, url, mirror string) error {
@@ -523,16 +621,8 @@ func cmdApt(e *env, pkgs []string) int {
 		}
 	}
 
-	args := []string{"apt-get", "install", "-y"}
-	if e.cfg.DownloadOnly {
-		args = append(args, "--download-only")
-	}
-	args = append(append(args,
-		"-o", "APT::Keep-Downloaded-Packages=true",
-		"-o", "Acquire::Retries="+strconv.Itoa(e.cfg.Retries),
-	), pkgs...)
 	e.log.Logf("event=exec what=apt packages=%s", strings.Join(pkgs, ","))
-	rc := runRoot(e, args...)
+	rc := runRoot(e, aptArgs(e.cfg, pkgs)...)
 	e.log.Logf("event=done what=apt rc=%d", rc)
 	if rc != 0 {
 		return rc
@@ -544,6 +634,18 @@ func cmdApt(e *env, pkgs []string) int {
 		}
 	}
 	return 0
+}
+
+func aptArgs(c *config.Config, pkgs []string) []string {
+	args := []string{"apt-get", "install", "-y"}
+	if c.DownloadOnly {
+		args = append(args, "--download-only")
+	}
+
+	return slices.Concat(args, []string{
+		"-o", "APT::Keep-Downloaded-Packages=true",
+		"-o", "Acquire::Retries=" + strconv.Itoa(c.Retries),
+	}, pkgs)
 }
 
 func fresh(e *env, path string) bool {
@@ -574,17 +676,23 @@ func debs(dir string) (map[string]bool, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]bool{}
-	for _, en := range entries {
-		if en.Type().IsRegular() && strings.HasSuffix(en.Name(), ".deb") {
-			out[en.Name()] = true
-		}
-	}
-	return out, nil
+	names := collections.Map(collections.Filter(entries, isDeb), os.DirEntry.Name)
+	return collections.ToSet(names), nil
+}
+
+func isDeb(en os.DirEntry) bool {
+	return en.Type().IsRegular() && strings.HasSuffix(en.Name(), ".deb")
+}
+
+func absentDebs(from, in map[string]bool) []string {
+	return collections.Filter(collections.SortedKeys(from), func(name string) bool {
+		return !in[name]
+	})
 }
 
 func preloadDebs(e *env) error {
-	cached, err := debs(e.cache.AptDir(cache.Release()))
+	dir := e.cache.AptDir(cache.Release())
+	cached, err := debs(dir)
 	if err != nil {
 		return err
 	}
@@ -593,12 +701,7 @@ func preloadDebs(e *env) error {
 		return err
 	}
 
-	var missing []string
-	for name := range cached {
-		if !present[name] {
-			missing = append(missing, filepath.Join(e.cache.AptDir(cache.Release()), name))
-		}
-	}
+	missing := missingDebs(cached, present, dir)
 	if len(missing) == 0 {
 		return nil
 	}
@@ -606,32 +709,36 @@ func preloadDebs(e *env) error {
 	if rc := runRoot(e, append([]string{"cp", "-p", "-t", aptArchives}, missing...)...); rc != 0 {
 		return fmt.Errorf("copying debs into %s exited with %d", aptArchives, rc)
 	}
-	e.log.Logf("event=cache-hit what=apt path=%s count=%d", e.cache.AptDir(cache.Release()), len(missing))
+	e.log.Logf("event=cache-hit what=apt path=%s count=%d", dir, len(missing))
 	return nil
 }
 
+func missingDebs(cached, present map[string]bool, dir string) []string {
+	return collections.Map(absentDebs(cached, present), func(name string) string {
+		return filepath.Join(dir, name)
+	})
+}
+
 func collectDebs(e *env) error {
+	dir := e.cache.AptDir(cache.Release())
 	present, err := debs(aptArchives)
 	if err != nil {
 		return err
 	}
-	cached, err := debs(e.cache.AptDir(cache.Release()))
+	cached, err := debs(dir)
 	if err != nil {
 		return err
 	}
 
-	n := 0
-	for name := range present {
-		if cached[name] {
-			continue
-		}
-		if err := cache.CopyFile(filepath.Join(aptArchives, name), filepath.Join(e.cache.AptDir(cache.Release()), name)); err != nil {
+	added := absentDebs(present, cached)
+	for _, name := range added {
+		if err := cache.CopyFile(filepath.Join(aptArchives, name), filepath.Join(dir, name)); err != nil {
 			return err
 		}
-		n++
 	}
-	if n > 0 {
-		e.log.Logf("event=cache-store what=apt path=%s count=%d", e.cache.AptDir(cache.Release()), n)
+
+	if len(added) > 0 {
+		e.log.Logf("event=cache-store what=apt path=%s count=%d", dir, len(added))
 	}
 	return nil
 }
@@ -648,11 +755,13 @@ func removable(dest string) error {
 	if strings.TrimSpace(dest) == "" {
 		return fmt.Errorf("DEST is empty")
 	}
+
 	abs, err := filepath.Abs(dest)
 	if err != nil {
 		return err
 	}
 	abs = filepath.Clean(abs)
+
 	if abs == "/" {
 		return fmt.Errorf("refusing to remove %s", abs)
 	}

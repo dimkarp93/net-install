@@ -25,26 +25,34 @@ func Open(dest string, mode os.FileMode) (*Target, error) {
 	}
 
 	dir := filepath.Dir(dest)
-	probe := dir
-	if _, err := os.Stat(dir); err != nil {
-		probe = filepath.Dir(dir)
-	}
+	t := &Target{dest: dest, mode: mode, sudo: !writable(probeDir(dir))}
 
-	t := &Target{dest: dest, mode: mode, sudo: !writable(probe)}
-
-	var err error
-	if t.sudo {
-		t.file, err = os.CreateTemp("", "net-install-*")
-	} else {
-		if err = os.MkdirAll(dir, 0o755); err != nil {
-			return nil, err
-		}
-		t.file, err = os.CreateTemp(dir, ".net-install-*")
-	}
+	file, err := createTemp(dir, t.sudo)
 	if err != nil {
 		return nil, err
 	}
+
+	t.file = file
 	return t, nil
+}
+
+func probeDir(dir string) string {
+	if _, err := os.Stat(dir); err != nil {
+		return filepath.Dir(dir)
+	}
+
+	return dir
+}
+
+func createTemp(dir string, sudo bool) (*os.File, error) {
+	if sudo {
+		return os.CreateTemp("", "net-install-*")
+	}
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	return os.CreateTemp(dir, ".net-install-*")
 }
 
 func (t *Target) File() *os.File { return t.file }

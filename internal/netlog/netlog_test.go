@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func frozen() func() time.Time {
@@ -21,20 +23,15 @@ func TestLogMatchesShellFormat(t *testing.T) {
 
 	want := "[net] ts=2026-09-20T01:54:11Z event=skip what=apt-retries reason=exists\n" +
 		"[net] ts=2026-09-20T01:54:11Z event=retry what=fetch https://example.com/x attempt=1/5 rc=7 seconds=80 sleep=5s\n"
-
-	if got := buf.String(); got != want {
-		t.Fatalf("log mismatch\ngot:\n%s\nwant:\n%s", got, want)
-	}
+	assert.Equal(t, want, buf.String())
 }
 
 func TestTimestampNeverCarriesAnOffset(t *testing.T) {
 	var buf bytes.Buffer
 	zone := time.FixedZone("YEKT", 5*60*60)
 	at := time.Date(2026, 9, 20, 6, 54, 11, 0, zone)
+
 	New(&buf, func() time.Time { return at }).Log("event=ok")
 
-	want := "[net] ts=2026-09-20T01:54:11Z event=ok\n"
-	if got := buf.String(); got != want {
-		t.Fatalf("got %q, want %q", got, want)
-	}
+	assert.Equal(t, "[net] ts=2026-09-20T01:54:11Z event=ok\n", buf.String())
 }

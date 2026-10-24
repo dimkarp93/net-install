@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net"
-	"syscall"
 )
 
 type Kind int
@@ -69,33 +68,31 @@ func classify(err error) *Error {
 		return &Error{Kind: KindRedirect, msg: errTooManyRedirects.Error()}
 	}
 
-	var dns *net.DNSError
-	if errors.As(err, &dns) {
-		return &Error{Kind: KindDNS, msg: err.Error()}
-	}
+	return &Error{Kind: kindOf(err), msg: err.Error()}
+}
 
+func kindOf(err error) Kind {
+	var dns *net.DNSError
+	var ne net.Error
+	switch {
+	case errors.As(err, &dns):
+		return KindDNS
+	case isTLS(err):
+		return KindTLS
+	case errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF):
+		return KindTruncated
+	case errors.As(err, &ne) && ne.Timeout():
+		return KindTimeout
+	default:
+		return KindConnect
+	}
+}
+
+func isTLS(err error) bool {
 	var cert *tls.CertificateVerificationError
 	var hostname x509.HostnameError
 	var unknown x509.UnknownAuthorityError
 	var record tls.RecordHeaderError
-	if errors.As(err, &cert) || errors.As(err, &hostname) || errors.As(err, &unknown) || errors.As(err, &record) {
-		return &Error{Kind: KindTLS, msg: err.Error()}
-	}
 
-	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
-		return &Error{Kind: KindTruncated, msg: err.Error()}
-	}
-
-	var ne net.Error
-	if errors.As(err, &ne) && ne.Timeout() {
-		return &Error{Kind: KindTimeout, msg: err.Error()}
-	}
-
-	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) ||
-		errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH) ||
-		errors.Is(err, syscall.EPIPE) {
-		return &Error{Kind: KindConnect, msg: err.Error()}
-	}
-
-	return &Error{Kind: KindConnect, msg: err.Error()}
+	return errors.As(err, &cert) || errors.As(err, &hostname) || errors.As(err, &unknown) || errors.As(err, &record)
 }

@@ -21,31 +21,43 @@ type Cache struct {
 }
 
 func Open(root string, ro bool) (*Cache, error) {
-	unavailable := func(reason string) error {
-		return fmt.Errorf("cache dir %s is unavailable (%s): pass --cache-dir DIR or --no-cache", root, reason)
+	if reason := checkRoot(root, ro); reason != "" {
+		return nil, fmt.Errorf("cache dir %s is unavailable (%s): pass --cache-dir DIR or --no-cache", root, reason)
 	}
 
+	return &Cache{root: root, ro: ro}, nil
+}
+
+func checkRoot(root string, ro bool) string {
 	st, err := os.Stat(root)
 	switch {
 	case err == nil && !st.IsDir():
-		return nil, unavailable("not a directory")
+		return "not a directory"
 	case os.IsNotExist(err) && ro:
-		return nil, unavailable("does not exist")
+		return "does not exist"
 	case os.IsNotExist(err):
-		if _, perr := os.Stat(filepath.Dir(root)); perr != nil {
-			return nil, unavailable("parent does not exist")
-		}
-		if err := os.Mkdir(root, 0o755); err != nil && !os.IsExist(err) {
-			return nil, unavailable(err.Error())
+		if reason := createRoot(root); reason != "" {
+			return reason
 		}
 	case err != nil:
-		return nil, unavailable(err.Error())
+		return err.Error()
 	}
 
 	if !ro && syscall.Access(root, wok) != nil {
-		return nil, unavailable("not writable")
+		return "not writable"
 	}
-	return &Cache{root: root, ro: ro}, nil
+	return ""
+}
+
+func createRoot(root string) string {
+	if _, err := os.Stat(filepath.Dir(root)); err != nil {
+		return "parent does not exist"
+	}
+
+	if err := os.Mkdir(root, 0o755); err != nil && !os.IsExist(err) {
+		return err.Error()
+	}
+	return ""
 }
 
 func (c *Cache) Root() string { return c.root }
@@ -86,20 +98,28 @@ func split(raw string) (host, p, query string, err error) {
 	if err != nil {
 		return "", "", "", err
 	}
-	host = u.Host
+
+	return cacheHost(u.Host), cachePath(u.Path), u.RawQuery, nil
+}
+
+func cacheHost(host string) string {
 	if host == "" {
-		host = "local"
+		return "local"
 	}
-	host = strings.ReplaceAll(host, ":", "_")
-	p = path.Clean("/" + u.Path)
-	p = strings.TrimPrefix(p, "/")
-	if p == "." {
-		p = ""
+
+	return strings.ReplaceAll(host, ":", "_")
+}
+
+func cachePath(raw string) string {
+	p := strings.TrimPrefix(path.Clean("/"+raw), "/")
+	switch {
+	case p == ".":
+		return ""
+	case strings.HasSuffix(raw, "/") && p != "":
+		return p + "/"
+	default:
+		return p
 	}
-	if strings.HasSuffix(u.Path, "/") && p != "" {
-		p += "/"
-	}
-	return host, p, u.RawQuery, nil
 }
 
 func Valid(file string) bool {
@@ -120,6 +140,7 @@ func Sum(file string) (string, error) {
 		return "", err
 	}
 	defer f.Close()
+
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err
@@ -136,23 +157,29 @@ func Temp(file string) (*os.File, error) {
 
 func Store(tmp *os.File, file string) error {
 	name := tmp.Name()
+	if err := finishTemp(tmp); err != nil {
+		return err
+	}
+
+	sum, err := Sum(name)
+	if err != nil {
+		return err
+	}
+
+	if err := os.Rename(name, file); err != nil {
+		return err
+	}
+	return os.WriteFile(file+".sha256", []byte(sum+"\n"), 0o644)
+}
+
+func finishTemp(tmp *os.File) error {
 	if err := tmp.Sync(); err != nil {
 		return err
 	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Chmod(name, 0o644); err != nil {
-		return err
-	}
-	sum, err := Sum(name)
-	if err != nil {
-		return err
-	}
-	if err := os.Rename(name, file); err != nil {
-		return err
-	}
-	return os.WriteFile(file+".sha256", []byte(sum+"\n"), 0o644)
+	return os.Chmod(tmp.Name(), 0o644)
 }
 
 func CopyFile(src, dst string) error {
@@ -166,18 +193,22 @@ func CopyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		os.Remove(out.Name())
-		return err
-	}
-	if err := out.Close(); err != nil {
-		os.Remove(out.Name())
-		return err
-	}
-	if err := os.Chmod(out.Name(), 0o644); err != nil {
+
+	if err := fillTemp(out, in); err != nil {
 		os.Remove(out.Name())
 		return err
 	}
 	return os.Rename(out.Name(), dst)
+}
+
+func fillTemp(out *os.File, in io.Reader) error {
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+
+	if err := out.Close(); err != nil {
+		return err
+	}
+	return os.Chmod(out.Name(), 0o644)
 }
